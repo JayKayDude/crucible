@@ -44,3 +44,11 @@ Lessons learned during implementation. Append new entries; do not delete old one
 - **MMLU Pro removed from reasoning suite**: MMLU Pro tests knowledge recall (memorized facts), not reasoning ability. BBH + GSM8K + IFEval better reflects actual reasoning without contamination from training data memorization.
 - **CLI `--limit` should override TOML per-task limits**: Useful for quick smoke tests. The initial split-mode implementation ignored the CLI `--limit` when in split mode — discovered during testing, fixed immediately by using `effective_limit = limit if limit is not None else grp_limit`.
 - **Model size tier predicts benchmark time better than t/s**: t/s and model quality/verbosity are correlated on real hardware. A 2B model at 150 t/s can take longer than a 14B MoE at 50 t/s because the 2B hits the token limit constantly and is more verbose per question.
+
+## Speed Profiler & Shipping (2026-05-25)
+
+- **128K speed test capped by fixture size**: `jquery.js` is ~75K tokens. The 128K context size test used ~75K tokens instead, labeled correctly in the DB but doesn't reflect true 128K behavior. If 128K speed matters, a larger fixture is needed.
+- **Speed degrades ~2.4× from 1K to 64K on Gemma 4 E2B**: 135.5 t/s at 1K → 57.5 t/s at 64K. Fairly linear degradation on LM Studio — no sharp cliff, just steady decline with context length.
+- **`.venv 2` (space in name) not caught by `.venv/` in .gitignore**: Had to add `.venv 2/` as an explicit separate entry. Git doesn't glob-expand spaces in ignore patterns.
+- **`results/lmeval/` and `results/*.db` must be in .gitignore**: Each user generates their own benchmark results — committing them would pollute the repo and create multi-GB diffs. Only configs and code belong in version control.
+- **GitHub repo name "crucible"**: Short, evocative, nothing obvious already owns it in the LLM space. Metaphor fits (crucible = vessel for testing under extreme conditions).

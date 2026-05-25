@@ -9,6 +9,11 @@ Persistent architectural decisions and context. Claude reads this at session sta
 - **Frontend:** FastAPI + Plotly.js, no build step
 - **Config:** TOML per model in `configs/models/`, TOML per suite in `configs/lmeval/`
 
+## Repository
+
+- **GitHub:** https://github.com/JayKayDude/crucible
+- **Gitignored:** `results/*.db`, `results/lmeval/`, `.venv 2/` — each user generates their own results
+
 ## Key Architectural Decisions
 
 - **Subprocess over library for lm-eval:** Stability and decoupling — lm-eval has heavy deps that can conflict; subprocess isolates it cleanly.
@@ -62,7 +67,7 @@ python3 bench.py import-lmeval --path results/lmeval/some_run/ --model local
 | coding-standard | humaneval_plus, mbpp_plus | none | 0-shot; system instruction scoped to coding suites only |
 | reasoning | bbh_cot_zeroshot, gsm8k_cot_zeroshot, ifeval | BBH=75/subtask, GSM8K=300, IFEval=all 541 | 0-shot; 2048 max_gen_toks; 3 separate subprocess calls |
 | codeneedle (recall) | long-context recall | 16 functions sampled | jquery.js or http_server.py corpus |
-| speed | tokens/sec across context sizes | 7 sizes: 1K–128K | 3 samples per size |
+| speed | tokens/sec across context sizes | 7 sizes: 1K–128K (128K capped at ~75K — fixture limit) | 3 samples per size |
 
 **coding-multilang deferred:** MultiPL-E tasks don't exist in lm-eval. BigCode Harness is the correct tool but scores are heavily correlated with Python (HumanEval+) — low ROI. `--suite coding-multilang` still exists as an explicit option but is not included in `--suite all` or `run-all`.
 

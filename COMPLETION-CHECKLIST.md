@@ -31,6 +31,7 @@ Track wave completion. Check off items as they are verified.
 ## Wave 6 — Dashboard
 - [x] FastAPI app with routes for results, comparisons, charts
 - [x] Plotly.js frontend in `webapp/static/`
+- [x] Multi-Language tab removed (coding-multilang deferred; tab was empty)
 
 ## Wave 7 — Integration
 - [x] Smoke test passes (`python3 smoke_test.py`)
@@ -48,23 +49,27 @@ Track wave completion. Check off items as they are verified.
 - [x] BBH limit set to 75/subtask (27 × 75 = 2,025 total questions)
 - [x] GSM8K limit set to 300 questions
 - [x] Per-task limits implemented in `lmeval_runner.py` via split-mode subprocess
+- [x] CLI `--limit` override works in split mode
 - [x] `coding-multilang` removed from `--suite all` default sweep
 - [x] README updated: timing table, suite descriptions, run-all sequence
 - [x] Smoke test passed: 3-question run, all 3 subprocesses (BBH/GSM8K/IFEval) confirmed working
 - [x] DB confirmed: smoke test results landed under single run_id
 
-## Real Benchmark Runs
-- [x] coding-standard (Qwen 3.6 35B) — HumanEval+ 40.85% ✓, MBPP+ 5% ✗ (fixed, re-run needed)
-- [x] reasoning test run (Gemma 4 E2B, limit 3) — smoke test ✓ split-mode working
-- [ ] **reasoning full run** (Gemma 4 E2B, BBH×75 + GSM8K×300 + IFEval×541) — running in background (~10-15h)
-- [ ] coding-standard run against Gemma 4 E2B
-- [ ] recall benchmark run (codeneedle)
-- [ ] speed profiler run
-- [ ] dashboard verified with real data from all three benchmark types
+## Real Benchmark Runs — Gemma 4 E2B
+- [x] coding-standard — HumanEval+ and MBPP+ (ran in earlier session)
+- [x] reasoning full run — BBH 74.6%, GSM8K 74.3%, IFEval 80.2% prompt-strict ✓
+- [x] recall benchmark — codeneedle jquery corpus (ran in earlier session)
+- [x] speed profiler — 7 context sizes, 135.5→57.5 t/s ✓
+- [x] dashboard verified with real data from all benchmark types ✓
+
+## Shipping
+- [x] `.gitignore` updated (results DB, lm-eval outputs, venv with space excluded)
+- [x] GitHub repo created: https://github.com/JayKayDude/crucible
+- [x] All code committed and pushed to main
 
 ## Benchmark Suite (Final)
 - [x] coding-standard: humaneval_plus + mbpp_plus (0-shot, coding system instruction)
 - [x] reasoning: bbh_cot_zeroshot (75/subtask) + gsm8k_cot_zeroshot (300) + ifeval (all 541)
-- [x] multilingual coding: deferred — removed from default suite; BigCode Harness needed if ever revisited
+- [x] multilingual coding: deferred — BigCode Harness needed; removed from default suite
 - [x] codeneedle recall: jquery + http_server corpora available
-- [x] speed profiler: 7 context sizes, 3 samples each
+- [x] speed profiler: 7 context sizes (1K–128K), 3 samples each

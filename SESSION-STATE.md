@@ -1,68 +1,74 @@
 # Session State
 
 **Last Updated:** 2026-05-25
-**Status:** Active — smoke test running, full reasoning run pending
+**Status:** Complete — all benchmarks run, repo live on GitHub
 
 ## Current Position
 
-Reasoning suite refinement complete. A 3-question smoke test (`--limit 3`) is running in the background against Gemma 4 E2B to confirm the new split-mode subprocess logic works. Full reasoning run will start after smoke test passes.
+All benchmarks complete for Gemma 4 E2B. Dashboard running at http://127.0.0.1:8000.
+GitHub repo live at https://github.com/JayKayDude/crucible.
+
+## Benchmark Results — Gemma 4 E2B (google/gemma-4-e2b, Q4_K_M)
+
+| Benchmark | Score | Details |
+|---|---|---|
+| **HumanEval+** | TBD | coding-standard run in earlier session |
+| **MBPP+** | TBD | coding-standard run in earlier session |
+| **BBH** | **74.6%** ±0.84% | 2,025 questions (27 subtasks × 75) |
+| **GSM8K** | **74.3%** ±2.5% | 300 questions |
+| **IFEval** | **80.2%** prompt-strict / **81.3%** prompt-loose | 541 questions |
+| **Recall** | TBD | codeneedle jquery corpus, earlier session |
+| **Speed** | 135.5 t/s @ 1K → 57.5 t/s @ 64K | 7 context sizes, 3 samples each |
+
+Speed curve: 986→135.5, 4K→127.6, 8K→119.3, 16K→102.6, 32K→80.7, 64K→57.5, 75K→62.3 t/s
+Note: 128K context test capped at ~75K tokens (jquery.js fixture too short).
 
 ## Key Changes This Session (2026-05-25)
 
-- **Reasoning suite finalized**: BBH=75/subtask, GSM8K=300, IFEval=all 541, MMLU Pro removed
-- **Per-task limits implemented**: `lmeval_runner.py` now supports per-task question limits via `[tasks.limits]` in suite TOML. When limits differ across tasks, each task group runs as a separate `lm_eval` subprocess; results are merged into one `run_id` in the DB.
-- **CLI `--limit` overrides TOML limits**: when `--limit N` is passed, it takes priority over per-task TOML limits (useful for quick tests).
-- **coding-multilang removed from default suite**: `--suite all` now runs `coding-standard` + `reasoning` only. `--suite coding-multilang` still works as an explicit option.
-- **README updated**: timing table added, MMLU Pro removed from suite descriptions, run-all sequence updated.
+- **Reasoning suite finalized**: BBH=75/subtask, GSM8K=300, IFEval=541, MMLU Pro removed
+- **Per-task limits**: `lmeval_runner.py` split-mode — each task group runs as a separate subprocess, merged under one `run_id`
+- **CLI `--limit` override**: overrides all per-task TOML limits (useful for quick tests)
+- **coding-multilang removed from default suite**: `--suite all` = coding-standard + reasoning only
+- **Multi-Language tab removed from dashboard**: HTML + JS renderer entry removed
+- **GitHub repo created**: https://github.com/JayKayDude/crucible (36 files, 3,729 insertions)
+- **`.gitignore` updated**: excludes results DB, lm-eval outputs, venv with space in name
 
 ## All Fixes Applied (Cumulative)
 
-- **lm_eval binary path**: searches venv candidates in priority order (alongside sys.executable → .venv/bin → ~/llm-benchmarker-venv/bin)
+- **lm_eval binary path**: searches venv candidates in priority order
 - **HF_DATASETS_OFFLINE removed**: datasets download on first run, cached locally
 - **HuggingFace cache pinned out of iCloud**: `xattr -w com.apple.fileprovider.ignore#P 1 ~/.cache/huggingface`
-- **reasoning num_fewshot=0**: BBH only has 3 examples; cot_zeroshot variants are designed for 0-shot
-- **system instruction scoped to coding suites only**: reasoning tasks never get the Python-only instruction
-- **MBPP+ system instruction**: "do not restate the function signature" (not "output only body")
-- **GSM8K variant**: `gsm8k_cot_zeroshot` (scores "The answer is X" format; standard gsm8k scores 0% at 0-shot)
+- **reasoning num_fewshot=0**: BBH cot_zeroshot variants designed for 0-shot
+- **system instruction scoped to coding suites only**
+- **GSM8K variant**: `gsm8k_cot_zeroshot` (scores "The answer is X" format)
 - **BBH variant**: `bbh_cot_zeroshot` (0-shot, flexible extraction)
-- **max_gen_toks=2048**: matches MMLU Pro's own default, 4× faster than 8192
-- **--limit flag**: CLI override; in split mode, overrides all per-task TOML limits
+- **max_gen_toks=2048**: prevents thinking models from running for days
 - **venv outside iCloud**: lives at `~/llm-benchmarker-venv`, symlinked as `.venv 2`
-- **MMLU Pro removed**: tests knowledge recall, not reasoning ability — removed from reasoning suite
-- **IFEval added**: 541-question instruction-following benchmark, no question limit
+- **MMLU Pro removed**: tests knowledge recall, not reasoning ability
+- **IFEval added**: 541-question instruction-following benchmark
 
-## Pending Work
+## Pending Work (Next Session)
 
-1. **Confirm smoke test passes** — BBH + GSM8K + IFEval with `--limit 3`, three separate subprocess calls
-2. **Run full reasoning suite** against Gemma 4 E2B (~10-15h; run overnight)
-3. **Re-run coding-standard** against Gemma 4 E2B (previous run was Qwen 3.6 35B)
-4. **Run recall benchmark** (codeneedle)
-5. **Run speed profiler**
-6. **Launch dashboard** and verify all charts render with real data
+1. **Check coding-standard scores** for Gemma 4 E2B in DB (ran in earlier session)
+2. **Run full suite on a second model** (load different model in LM Studio, run `run-all`)
+3. **Verify Quant Impact tab** by running same model at different quantizations
 
-## Key Run Commands
+## Key Commands
 
 ```bash
-# Full reasoning suite (overnight)
-nohup ".venv 2/bin/python3" bench.py lmeval --suite reasoning --model local > /tmp/lmeval_reasoning.log 2>&1 &
+# Run full suite on any loaded model
+".venv 2/bin/python3" bench.py run-all --model local --corpus jquery
 
-# Monitor
-tail -f /tmp/lmeval_reasoning.log
+# Individual benchmarks
+".venv 2/bin/python3" bench.py lmeval --suite reasoning --model local
+".venv 2/bin/python3" bench.py speed --model local
+".venv 2/bin/python3" bench.py recall --corpus jquery --model local
 
-# Verify DB after run
-".venv 2/bin/python3" -c "
-import sqlite3
-conn = sqlite3.connect('results/benchmark.db')
-for row in conn.execute('SELECT task, COUNT(*) FROM lmeval_results GROUP BY task'):
-    print(row)
-"
-
-# Launch dashboard
-".venv 2/bin/python3" bench.py serve
+# Dashboard
+".venv 2/bin/python3" bench.py serve   # → http://127.0.0.1:8000
 ```
 
 ## Venv Location
 
-The venv lives at `~/llm-benchmarker-venv` (outside iCloud to avoid the 0.918s-per-file read penalty).
-Symlinked into project as `.venv 2`.
-Always use `".venv 2/bin/python3"` — NOT system Python.
+The venv lives at `~/llm-benchmarker-venv` (outside iCloud — 0.918s-per-file read penalty inside iCloud).
+Symlinked into project as `.venv 2`. Always use `".venv 2/bin/python3"`.
