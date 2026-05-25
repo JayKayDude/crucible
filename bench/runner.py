@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-import time
+import statistics as _stats
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from .client import ClientConfig, chat_complete
 from .extract import Source, extract, load_source_glob, stratified_sample
 from .report import render_function, render_summary
 from .scorer import FunctionScore, score
+from .timing import complete_with_timing, warmup as kv_warmup, TimingResult
 
 
 # Keeping the file FIRST and the tiny task suffix LAST is deliberate:
@@ -80,7 +82,7 @@ def _build_prompt(target, text: str, multi_file: bool, suppress_thinking: bool) 
     )
 
 
-def _preflight_context_check(prompt: str, cfg: ClientConfig) -> str | None:
+def _preflight_context_check(prompt: str, cfg) -> str | None:
     """Send the actual prompt with max_tokens=1 to detect context-too-small.
 
     Returns None on success, an error message string otherwise. Cheap because
@@ -99,7 +101,9 @@ def _preflight_context_check(prompt: str, cfg: ClientConfig) -> str | None:
     """
     from dataclasses import replace
 
-    probe_cfg = replace(cfg, max_tokens=16)
+    # cfg may be a ClientConfig or a ModelConfig — get the inner ClientConfig
+    client_cfg = getattr(cfg, "client", cfg)
+    probe_cfg = replace(client_cfg, max_tokens=16)
     try:
         chat_complete(probe_cfg, system=None, user=prompt)
         return None
@@ -112,9 +116,52 @@ def _is_context_error(msg: str) -> bool:
     return any(s in m for s in ("context length", "n_ctx", "n_keep", "too long", "exceeds"))
 
 
+def _aggregate_runs(
+    target,
+    raw_runs: list[tuple[str, "TimingResult"]],
+    score_fn,
+    relax_indent: bool = False,
+) -> dict:
+    """Aggregate N (response, timing) pairs into one result dict."""
+    from bench.scorer import score as _score
+
+    scores = [_score(target.name, target.primary_lines, target.bonus_lines, resp, relax_indent=relax_indent)
+              for resp, _ in raw_runs]
+    timings = [t for _, t in raw_runs]
+
+    best_idx = max(range(len(scores)), key=lambda i: scores[i].primary_matched)
+    best_score = scores[best_idx]
+    best_response = raw_runs[best_idx][0]
+
+    def _mean(vals):
+        v = [x for x in vals if x is not None]
+        return _stats.mean(v) if v else None
+
+    def _stdev(vals):
+        v = [x for x in vals if x is not None]
+        return _stats.stdev(v) if len(v) > 1 else 0.0
+
+    return {
+        "best_score": best_score,
+        "best_response": best_response,
+        "matched_mean":          _mean([s.primary_matched for s in scores]),
+        "matched_stddev":        _stdev([s.primary_matched for s in scores]),
+        "hallucinated_mean":     _mean([s.hallucinated for s in scores]),
+        "pass_rate":             sum(s.passed for s in scores) / len(scores),
+        "latency_mean_s":        _mean([t.latency_s for t in timings]),
+        "latency_stddev_s":      _stdev([t.latency_s for t in timings]),
+        "prefill_tps_mean":      _mean([t.prefill_tokens_per_s for t in timings]),
+        "prefill_tps_stddev":    _stdev([x for x in [t.prefill_tokens_per_s for t in timings] if x is not None]),
+        "generation_tps_mean":   _mean([t.generation_tokens_per_s for t in timings]),
+        "generation_tps_stddev": _stdev([x for x in [t.generation_tokens_per_s for t in timings] if x is not None]),
+        "overall_tps_mean":      _mean([t.overall_tokens_per_s for t in timings]),
+        "ttft_mean_s":           _mean([t.ttft_s for t in timings]),
+    }
+
+
 def run_benchmark(
     source: Source,
-    cfg: ClientConfig,
+    cfg,
     k: int = 16,
     seed: int = 42,
     dump_path: Path | None = None,
@@ -124,6 +171,34 @@ def run_benchmark(
     fail_fast_after: int | None = 2,
     relax_indent: bool = False,
 ) -> list[FunctionScore]:
+    # Support both a raw ClientConfig (legacy CLI path) and a ModelConfig.
+    # When a full ModelConfig is passed, extract the inner ClientConfig for
+    # low-level API calls and keep the ModelConfig for capability flags.
+    if hasattr(cfg, "client"):
+        model_cfg = cfg          # ModelConfig
+        client_cfg = cfg.client  # ClientConfig
+    else:
+        model_cfg = None
+        client_cfg = cfg         # bare ClientConfig (legacy)
+
+    # Auto-detect the actual loaded model name from the server so the DB row
+    # is labeled with the real model ID (e.g. "google/gemma-4-e2b") not the
+    # TOML file stem (e.g. "local").
+    if model_cfg is not None and not getattr(model_cfg, "model_name", None):
+        try:
+            from bench.timing import detect_loaded_model
+            detected = detect_loaded_model(getattr(client_cfg, "base_url", ""))
+            model_cfg.model_name = detected["name"]
+            if not getattr(model_cfg, "quantization", None):
+                model_cfg.quantization = detected.get("quantization")
+            if not getattr(model_cfg, "architecture", None):
+                model_cfg.architecture = detected.get("architecture")
+        except Exception:
+            pass
+
+    # Generate a unique run_id for this benchmark run
+    run_id = str(uuid.uuid4())
+
     text = source.text
     total_lines = text.count("\n") + 1
     print(
@@ -174,8 +249,8 @@ def run_benchmark(
             print("The loaded model context is smaller than the prompt. The most common", flush=True)
             print("cause is LM Studio JIT-reloading at default 4K context after its TTL", flush=True)
             print("expired. Force-reload at the size you need:", flush=True)
-            print(f"\n   lms unload {cfg.model}", flush=True)
-            print(f"   lms load {cfg.model} --context-length 131072 --gpu max -y\n", flush=True)
+            print(f"\n   lms unload {client_cfg.model}", flush=True)
+            print(f"   lms load {client_cfg.model} --context-length 131072 --gpu max -y\n", flush=True)
             print("Re-run after the model is loaded. (Pass --skip-preflight to override.)", flush=True)
             raise SystemExit(2)
         else:
@@ -184,43 +259,75 @@ def run_benchmark(
             print("Fix the server-side error or pass --skip-preflight to push past this check.", flush=True)
             raise SystemExit(2)
 
+    # Determine multi-run settings
+    n_runs = max(1, getattr(model_cfg, "runs_per_function", 1) if model_cfg else 1)
+    if n_runs > 1 and getattr(client_cfg, "temperature", None) == 0.0:
+        print(
+            f"  Warning: runs_per_function={n_runs} but temperature=0.0 — results identical, only timing varies",
+            flush=True,
+        )
+
+    # KV cache warmup before the main loop (only when doing multiple runs)
+    if n_runs > 1 and chosen:
+        warmup_prompt = _build_prompt(chosen[0], text, multi_file, suppress_thinking)
+        kv_warmup(client_cfg, model_cfg, warmup_prompt)
+
     scores: list[FunctionScore] = []
     runs: list[_Run] = []
+    all_result_dicts: list[dict] = []
     consecutive_errors = 0
     for i, t in enumerate(chosen, 1):
         prompt = _build_prompt(t, text, multi_file, suppress_thinking)
+        system_msg = None
+        user_msg = prompt
         print(
             f"\n[{i}/{len(chosen)}] `{t.name}` — prompt {len(prompt):,} chars, waiting on model...",
             flush=True,
         )
-        start = time.monotonic()
+
         request_error: str | None = None
-        try:
-            resp = chat_complete(cfg, system=None, user=prompt)
-        except Exception as e:
-            request_error = str(e)
-            print(f"  ERROR: {request_error}", flush=True)
-            resp = ""
-        latency = time.monotonic() - start
-        if resp is None:
-            print(f"  response: None in {latency:.1f}s", flush=True)
-            resp = ""
+        raw_runs: list[tuple[str, TimingResult]] = []
+
+        for run_idx in range(n_runs):
+            try:
+                resp, timing = complete_with_timing(client_cfg, model_cfg or client_cfg, system_msg, user_msg)
+            except Exception as e:
+                request_error = str(e)
+                print(f"  ERROR (run {run_idx + 1}/{n_runs}): {request_error}", flush=True)
+                resp = ""
+                timing = TimingResult(latency_s=0.0)
+            raw_runs.append((resp, timing))
+
+        # Use the first run's timing for the legacy latency display
+        first_resp, first_timing = raw_runs[0]
+        if first_resp is None:
+            print(f"  response: None in {first_timing.latency_s:.1f}s", flush=True)
+            raw_runs[0] = ("", first_timing)
         else:
-            print(f"  response: {len(resp)} chars in {latency:.1f}s", flush=True)
+            print(
+                f"  response: {len(first_resp)} chars in {first_timing.latency_s:.1f}s"
+                + (f" (x{n_runs} runs)" if n_runs > 1 else ""),
+                flush=True,
+            )
+
+        # Aggregate all runs
+        agg = _aggregate_runs(t, raw_runs, score, relax_indent=relax_indent)
+
+        sc = agg["best_score"]
 
         # Empty content with no exception = HTTP 200 but the model produced
         # nothing. On reasoning models that's typically the CoT eating the
         # entire max_tokens budget. Treat as a non-recall error so it shows
         # as ERROR, not FAIL.
         score_error = request_error
-        if resp.strip() == "" and score_error is None:
+        best_resp = agg["best_response"]
+        if best_resp.strip() == "" and score_error is None:
             score_error = (
                 "empty response (200 OK but no content; reasoning models often need "
                 "more max_tokens — try --max-tokens 8000)"
             )
             print(f"  ⚠ {score_error}", flush=True)
 
-        sc = score(t.name, t.primary_lines, t.bonus_lines, resp, relax_indent=relax_indent)
         if score_error:
             sc.error = score_error
         scores.append(sc)
@@ -229,12 +336,41 @@ def run_benchmark(
                 function=t.name,
                 source_path=str(t.source_path) if t.source_path else None,
                 prompt_chars=len(prompt),
-                response=resp,
-                latency_s=latency,
+                response=best_resp,
+                latency_s=agg["latency_mean_s"] or 0.0,
                 error=score_error,
             )
         )
         print(render_function(sc), flush=True)
+
+        # Build the result dict for JSON dump and DB insertion
+        result_dict = {
+            "function":            sc.name,
+            "source_file":         str(t.source_path) if t.source_path else None,
+            "passed":              sc.passed,
+            "error":               sc.error,
+            "primary_matched":     sc.primary_matched,
+            "primary_total":       sc.primary_total,
+            "hallucinated":        sc.hallucinated,
+            "bonus_matched":       sc.bonus_matched,
+            "prompt_chars":        len(prompt),
+            "response":            best_resp,
+            # timing — keep legacy key + add mean/stddev keys
+            "latency_s":           agg["latency_mean_s"],
+            "latency_mean_s":      agg["latency_mean_s"],
+            "latency_stddev_s":    agg["latency_stddev_s"],
+            # multi-run aggregate stats
+            "matched_mean":        agg["matched_mean"],
+            "matched_stddev":      agg["matched_stddev"],
+            "hallucinated_mean":   agg["hallucinated_mean"],
+            "pass_rate":           agg["pass_rate"],
+            "prefill_tps_mean":    agg["prefill_tps_mean"],
+            "generation_tps_mean": agg["generation_tps_mean"],
+            "overall_tps_mean":    agg["overall_tps_mean"],
+            "ttft_mean_s":         agg["ttft_mean_s"],
+            "start_line":          getattr(t, "start_line", None),
+        }
+        all_result_dicts.append(result_dict)
 
         # Fail-fast: if N queries in a row error, the rest will too. Bail.
         if score_error:
@@ -279,31 +415,43 @@ def run_benchmark(
     if dump_path:
         dump_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "files": [str(p) for p in source.files],
-            "model": cfg.model,
-            "base_url": cfg.base_url,
-            "temperature": cfg.temperature,
-            "max_tokens": cfg.max_tokens,
-            "relax_indent": relax_indent,
-            "results": [
-                {
-                    "function": sc.name,
-                    "source_file": r.source_path,
-                    "passed": sc.passed,
-                    "error": sc.error,
-                    "primary_matched": sc.primary_matched,
-                    "primary_total": sc.primary_total,
-                    "hallucinated": sc.hallucinated,
-                    "bonus_matched": sc.bonus_matched,
-                    "latency_s": r.latency_s,
-                    "prompt_chars": r.prompt_chars,
-                    "response": r.response,
-                }
-                for sc, r in zip(scores, runs)
-            ],
+            "files":         [str(p) for p in source.files],
+            "model":         client_cfg.model,
+            "base_url":      client_cfg.base_url,
+            "temperature":   client_cfg.temperature,
+            "max_tokens":    client_cfg.max_tokens,
+            "relax_indent":  relax_indent,
+            # new top-level metadata
+            "run_id":        run_id,
+            "model_config":  getattr(model_cfg, "name", None),
+            "quantization":  getattr(model_cfg, "quantization", None),
+            "architecture":  getattr(model_cfg, "architecture", None),
+            "runtime":       getattr(model_cfg, "runtime", "openai-compat"),
+            "hardware":      getattr(model_cfg, "hardware", None),
+            "n_runs":        n_runs,
+            "results":       all_result_dicts,
         }
         dump_path.write_text(json.dumps(payload, indent=2))
         print(f"\nResults dumped to {dump_path}", flush=True)
+
+        # Write to SQLite DB alongside the JSON dump
+        if model_cfg is not None:
+            try:
+                from bench.db import get_db, upsert_model_config, insert_recall_run, insert_recall_result
+
+                db_path = dump_path.parent / "benchmark.db"
+                conn = get_db(db_path)
+                mc_id = upsert_model_config(conn, model_cfg)
+                # corpus_name: derive from dump_path stem (pattern: <corpus>__<model>.json)
+                stem = dump_path.stem
+                corpus_name = stem.split("__")[0] if "__" in stem else stem
+                insert_recall_run(conn, mc_id, corpus_name, model_cfg, run_id, str(dump_path))
+                for result in all_result_dicts:
+                    insert_recall_result(conn, run_id, result)
+                conn.close()
+                print(f"Results written to {db_path}", flush=True)
+            except Exception as db_err:
+                print(f"  Warning: DB write failed: {db_err}", flush=True)
 
     return scores
 

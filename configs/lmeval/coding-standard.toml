@@ -1,0 +1,8 @@
+[suite]
+name        = "coding-standard"
+description = "Python coding correctness — EvalPlus (less contaminated than original HumanEval/MBPP)"
+
+[tasks]
+include     = ["humaneval_plus", "mbpp_plus"]
+num_fewshot = 0
+batch_size  = 1

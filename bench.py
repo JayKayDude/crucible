@@ -5,13 +5,24 @@ Tests an LLM's ability to reproduce the first N lines of a named function
 inside a large source corpus loaded into context. Measures positional recall,
 not just named-entity lookup.
 
-Source selection (extract / run / rescore):
+Source selection (extract / recall / rescore):
     --corpus NAME      a config under configs/corpora/, or a path to one
     --file PATH        single source file (.js/.mjs/.cjs/.py)
 
-Model selection (run only):
+Model selection (recall only):
     --model NAME       a config under configs/models/, OR a raw model identifier
                        (raw names get sane defaults; create a config for control)
+
+Subcommands:
+    extract        list functions the extractor would test
+    recall         run the positional recall benchmark (alias: run)
+    run            alias for recall
+    rescore        re-score a previous dump without re-querying
+    lmeval         run lm-eval harness suites
+    speed          measure inference speed across context sizes
+    import-lmeval  import existing lm-eval output directory into DB
+    run-all        run recall + all lm-eval suites + speed in sequence
+    serve          start the web dashboard
 """
 from __future__ import annotations
 
@@ -85,10 +96,10 @@ def cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
-# --- run ------------------------------------------------------------------
+# --- recall (was: run) ---------------------------------------------------
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def cmd_recall(args: argparse.Namespace) -> int:
     from bench.config import auto_dump_path, load_model
     from bench.runner import run_benchmark
 
@@ -102,6 +113,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"  (no model config '{args.model}' found; using as raw model identifier with defaults)",
             file=sys.stderr,
         )
+
+    # --runs override
+    if getattr(args, "runs", None):
+        model.runs_per_function = args.runs
 
     # CLI overrides — applied on top of whichever source the model came from.
     if args.base_url:
@@ -153,7 +168,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     fn_filter = args.function if args.function else None
     scores = run_benchmark(
         source=source,
-        cfg=model.client,
+        cfg=model,
         k=k,
         seed=seed,
         dump_path=dump_path,
@@ -165,6 +180,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     passed = sum(1 for s in scores if s.passed)
     return 0 if passed == len(scores) else 1
+
+
+# keep the old name around so cmd_run_all can call it directly
+cmd_run = cmd_recall
 
 
 # --- rescore --------------------------------------------------------------
@@ -225,11 +244,197 @@ def cmd_rescore(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- lmeval ---------------------------------------------------------------
+
+
+def cmd_lmeval(args: argparse.Namespace) -> int:
+    try:
+        from bench.lmeval_runner import run_lmeval_suite, load_suite
+    except ImportError:
+        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        return 1
+
+    from bench.config import load_model
+
+    model, _ = load_model(args.model)
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+    output_dir = Path("results/lmeval")
+
+    suites_to_run = ["coding-standard", "reasoning"] \
+        if args.suite == "all" else [args.suite]
+
+    limit = getattr(args, "limit", None)
+    for suite_name in suites_to_run:
+        suite = load_suite(suite_name)
+        run_lmeval_suite(model, suite, output_dir, db_path, limit=limit)
+
+    return 0
+
+
+# --- speed ----------------------------------------------------------------
+
+
+def cmd_speed(args: argparse.Namespace) -> int:
+    from bench.speed_profiler import profile_speed, DEFAULT_CONTEXT_SIZES
+    from bench.config import load_model
+
+    model, _ = load_model(args.model)
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+
+    sizes = None
+    if getattr(args, "context_sizes", None):
+        sizes = [int(x.strip()) for x in args.context_sizes.split(",")]
+
+    n_samples = getattr(args, "samples", 3)
+    profile_speed(model, db_path, context_sizes=sizes, n_samples=n_samples)
+    return 0
+
+
+# --- import-lmeval --------------------------------------------------------
+
+
+def cmd_import_lmeval(args: argparse.Namespace) -> int:
+    try:
+        from bench.lmeval_runner import import_lmeval_results
+    except ImportError:
+        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        return 1
+
+    from bench.config import load_model
+
+    model, _ = load_model(args.model)
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+    suite_name = getattr(args, "suite_name", "imported")
+    import_lmeval_results(Path(args.path), model, db_path, suite_name)
+    return 0
+
+
+# --- run-all --------------------------------------------------------------
+
+
+def cmd_run_all(args: argparse.Namespace) -> int:
+    try:
+        from bench.lmeval_runner import run_lmeval_suite, load_suite
+    except ImportError:
+        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        return 1
+    from bench.speed_profiler import profile_speed
+    from bench.config import load_model
+
+    model, _ = load_model(args.model)
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+
+    # 1. Recall
+    print("\n=== Step 1/5: Recall benchmark ===")
+    args_copy = type("A", (), {
+        "model": args.model,
+        "corpus": args.corpus,
+        "file": None,
+        "runs": getattr(args, "runs", None),
+        "db": str(db_path),
+        "base_url": None,
+        "api_key": None,
+        "temperature": None,
+        "max_tokens": None,
+        "timeout": None,
+        "k": None,
+        "seed": None,
+        "dump": None,
+        "function": None,
+        "think": False,
+        "skip_preflight": False,
+        "fail_fast_after": 2,
+        "no_fail_fast": False,
+        "relax_indent": False,
+        "strict_indent": False,
+    })()
+    cmd_recall(args_copy)
+
+    # 2-3. lm-eval suites (multilang deferred — MultiPL-E not in lm-eval 0.4.x)
+    output_dir = Path("results/lmeval")
+    for i, suite_name in enumerate(["coding-standard", "reasoning"], 2):
+        print(f"\n=== Step {i}/4: lm-eval {suite_name} ===")
+        suite = load_suite(suite_name)
+        run_lmeval_suite(model, suite, output_dir, db_path)
+
+    # 4. Speed
+    print("\n=== Step 4/4: Speed profiler ===")
+    profile_speed(model, db_path)
+
+    return 0
+
+
+# --- serve ----------------------------------------------------------------
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        from webapp.main import serve
+    except ImportError:
+        print("Error: FastAPI not installed. Run: pip install -r requirements-extended.txt")
+        return 1
+
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+    host = getattr(args, "host", "127.0.0.1")
+    port = getattr(args, "port", 8000)
+    print(f"Dashboard: http://{host}:{port}")
+    serve(db_path=db_path, host=host, port=port)
+    return 0
+
+
 # --- argparse -------------------------------------------------------------
 
 
+def _add_recall_args(p_recall: argparse.ArgumentParser) -> None:
+    """Attach all recall/run arguments to a subparser."""
+    src_grp = p_recall.add_mutually_exclusive_group()
+    src_grp.add_argument("--corpus", help="corpus config name (configs/corpora/<name>.toml) or path")
+    src_grp.add_argument("--file", help="single source file")
+    p_recall.add_argument(
+        "--model", required=True,
+        help="model config name (configs/models/<name>.toml), a path, or a raw model identifier",
+    )
+    p_recall.add_argument("--base-url", default=None, help="overrides model config")
+    p_recall.add_argument("--api-key", default=None)
+    p_recall.add_argument("--temperature", type=float, default=None)
+    p_recall.add_argument("--max-tokens", type=int, default=None)
+    p_recall.add_argument("--timeout", type=float, default=None)
+    p_recall.add_argument("-k", type=int, default=None, help="overrides corpus.sample.k")
+    p_recall.add_argument("--seed", type=int, default=None)
+    p_recall.add_argument(
+        "--runs", type=int, default=None, metavar="N",
+        help="override runs_per_function from model config",
+    )
+    p_recall.add_argument(
+        "--dump", default=None,
+        help="JSON path for full results (default: results/<corpus>__<model>.json)",
+    )
+    p_recall.add_argument("--function", action="append", help="repeatable; overrides sampling")
+    p_recall.add_argument("--think", action="store_true", help="allow chain-of-thought (default: suppress)")
+    p_recall.add_argument(
+        "--skip-preflight", action="store_true",
+        help="skip the context-fit pre-flight probe (not recommended)",
+    )
+    p_recall.add_argument(
+        "--fail-fast-after", type=int, default=2, metavar="N",
+        help="abort the run after N consecutive ERROR results (default: 2)",
+    )
+    p_recall.add_argument(
+        "--no-fail-fast", action="store_true",
+        help="disable fail-fast; run every query even if they're all erroring",
+    )
+    p_recall.add_argument(
+        "--relax-indent", action="store_true",
+        help="ignore leading whitespace when matching (overrides model config to true)",
+    )
+    p_recall.add_argument(
+        "--strict-indent", action="store_true",
+        help="enforce verbatim indentation (overrides model config to false)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # --- extract ------------------------------------------------------------
@@ -243,53 +448,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ex.add_argument("--show", metavar="NAME", help="print expected primary+bonus lines for one function")
     p_ex.set_defaults(func=cmd_extract)
 
-    # --- run ----------------------------------------------------------------
-    p_run = sub.add_parser("run", help="run the benchmark against an OpenAI-compatible endpoint")
-    src_grp = p_run.add_mutually_exclusive_group()
-    src_grp.add_argument("--corpus", help="corpus config name (configs/corpora/<name>.toml) or path")
-    src_grp.add_argument("--file", help="single source file")
-    p_run.add_argument(
-        "--model", required=True,
-        help="model config name (configs/models/<name>.toml), a path, or a raw model identifier",
+    # --- recall (canonical) -------------------------------------------------
+    p_recall = sub.add_parser(
+        "recall",
+        help="run the positional recall benchmark against an OpenAI-compatible endpoint",
     )
-    p_run.add_argument("--base-url", default=None, help="overrides model config")
-    p_run.add_argument("--api-key", default=None)
-    p_run.add_argument("--temperature", type=float, default=None)
-    p_run.add_argument("--max-tokens", type=int, default=None)
-    p_run.add_argument("--timeout", type=float, default=None)
-    p_run.add_argument("-k", type=int, default=None, help="overrides corpus.sample.k")
-    p_run.add_argument("--seed", type=int, default=None)
-    p_run.add_argument(
-        "--dump", default=None,
-        help="JSON path for full results (default: results/<corpus>__<model>.json)",
+    _add_recall_args(p_recall)
+    p_recall.set_defaults(func=cmd_recall)
+
+    # --- run (alias for recall) ---------------------------------------------
+    p_run = sub.add_parser(
+        "run",
+        help="alias for recall — run the benchmark against an OpenAI-compatible endpoint",
     )
-    p_run.add_argument("--function", action="append", help="repeatable; overrides sampling")
-    p_run.add_argument("--think", action="store_true", help="allow chain-of-thought (default: suppress)")
-    p_run.add_argument(
-        "--skip-preflight", action="store_true",
-        help="skip the context-fit pre-flight probe (not recommended)",
-    )
-    p_run.add_argument(
-        "--fail-fast-after", type=int, default=2, metavar="N",
-        help="abort the run after N consecutive ERROR results (default: 2)",
-    )
-    p_run.add_argument(
-        "--no-fail-fast", action="store_true",
-        help="disable fail-fast; run every query even if they're all erroring",
-    )
-    p_run.add_argument(
-        "--relax-indent", action="store_true",
-        help="ignore leading whitespace when matching (overrides model config to true)",
-    )
-    p_run.add_argument(
-        "--strict-indent", action="store_true",
-        help="enforce verbatim indentation (overrides model config to false)",
-    )
-    p_run.set_defaults(func=cmd_run)
+    _add_recall_args(p_run)
+    p_run.set_defaults(func=cmd_recall)
 
     # --- rescore ------------------------------------------------------------
     p_rs = sub.add_parser("rescore", help="re-score a previous --dump without re-querying")
-    p_rs.add_argument("dump", help="path to JSON dump from a prior `run`")
+    p_rs.add_argument("dump", help="path to JSON dump from a prior `recall`/`run`")
     src_grp = p_rs.add_mutually_exclusive_group()
     src_grp.add_argument("--corpus", help="re-locate corpus via this config")
     src_grp.add_argument("--file", help="re-locate corpus from a single file")
@@ -302,6 +479,117 @@ def build_parser() -> argparse.ArgumentParser:
         help="enforce verbatim indentation (overrides dump's setting)",
     )
     p_rs.set_defaults(func=cmd_rescore)
+
+    # --- lmeval -------------------------------------------------------------
+    p_lm = sub.add_parser(
+        "lmeval",
+        help="run lm-eval harness suites (requires lm-eval installation)",
+    )
+    p_lm.add_argument(
+        "--suite", required=True,
+        help="suite name (coding-standard | coding-multilang | reasoning | all)",
+    )
+    p_lm.add_argument(
+        "--model", required=True,
+        help="model config name or raw identifier",
+    )
+    p_lm.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_lm.add_argument(
+        "--limit", type=int, default=None,
+        help="limit number of examples per task (for testing only)",
+    )
+    p_lm.set_defaults(func=cmd_lmeval)
+
+    # --- speed --------------------------------------------------------------
+    p_sp = sub.add_parser(
+        "speed",
+        help="measure inference speed across context sizes",
+    )
+    p_sp.add_argument(
+        "--model", required=True,
+        help="model config name or raw identifier",
+    )
+    p_sp.add_argument(
+        "--context-sizes", default=None, metavar="SIZES",
+        help="comma-separated list of token counts (default: 1024,4096,8192,16384,32768,65536,131072)",
+    )
+    p_sp.add_argument(
+        "--samples", type=int, default=3, metavar="N",
+        help="timed samples per context size (default: 3)",
+    )
+    p_sp.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_sp.set_defaults(func=cmd_speed)
+
+    # --- import-lmeval ------------------------------------------------------
+    p_imp = sub.add_parser(
+        "import-lmeval",
+        help="import an existing lm-eval output directory into the DB",
+    )
+    p_imp.add_argument(
+        "--path", required=True,
+        help="path to lm-eval output directory containing results_*.json",
+    )
+    p_imp.add_argument(
+        "--model", required=True,
+        help="model config name or raw identifier",
+    )
+    p_imp.add_argument(
+        "--suite-name", default="imported",
+        help="label to use for this suite in the DB (default: imported)",
+    )
+    p_imp.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_imp.set_defaults(func=cmd_import_lmeval)
+
+    # --- run-all ------------------------------------------------------------
+    p_all = sub.add_parser(
+        "run-all",
+        help="run recall + all lm-eval suites + speed profiler in sequence",
+    )
+    p_all.add_argument(
+        "--model", required=True,
+        help="model config name or raw identifier",
+    )
+    p_all.add_argument(
+        "--corpus", required=True,
+        help="corpus config name for the recall step",
+    )
+    p_all.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_all.add_argument(
+        "--runs", type=int, default=None, dest="runs",
+        help="override runs_per_function for the recall step",
+    )
+    p_all.set_defaults(func=cmd_run_all)
+
+    # --- serve --------------------------------------------------------------
+    p_srv = sub.add_parser(
+        "serve",
+        help="start the web dashboard (requires FastAPI installation)",
+    )
+    p_srv.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_srv.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind host (default: 127.0.0.1)",
+    )
+    p_srv.add_argument(
+        "--port", type=int, default=8000,
+        help="bind port (default: 8000)",
+    )
+    p_srv.set_defaults(func=cmd_serve)
 
     return p
 

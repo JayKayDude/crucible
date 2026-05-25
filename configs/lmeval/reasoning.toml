@@ -1,0 +1,13 @@
+[suite]
+name        = "reasoning"
+description = "Mathematical and general reasoning"
+
+[tasks]
+include     = ["bbh_cot_zeroshot", "gsm8k_cot_zeroshot", "ifeval"]
+num_fewshot = 0
+batch_size  = 1
+
+[tasks.limits]
+bbh_cot_zeroshot   = 75   # per subtask; 27 × 75 = 2,025 questions total
+gsm8k_cot_zeroshot = 300  # total questions sampled
+# ifeval: no entry = no limit (all 541 questions)

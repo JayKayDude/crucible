@@ -1,0 +1,8 @@
+[suite]
+name        = "coding-multilang"
+description = "Multi-language coding via MultiPL-E (HumanEval translated to 7 languages)"
+
+[tasks]
+include     = ["multiple_js", "multiple_ts", "multiple_java", "multiple_cpp", "multiple_rs", "multiple_go", "multiple_py"]
+num_fewshot = 0
+batch_size  = 1

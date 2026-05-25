@@ -1,0 +1,28 @@
+# Universal local model config — works with LM Studio, llama.cpp, Ollama, MLX, etc.
+# Model name and quantization are auto-detected at runtime from GET /v1/models.
+# Change base_url to match your server:
+#   LM Studio:  http://127.0.0.1:1234
+#   llama.cpp:  http://127.0.0.1:8080
+#   Ollama:     http://127.0.0.1:11434
+base_url          = "http://127.0.0.1:1234"
+api_key           = "lm-studio"
+runtime           = "local"
+temperature       = 0.0
+max_tokens        = 32768
+timeout           = 600.0
+# Let thinking models (Qwen 3.x, DeepSeek-R1, etc.) use their full reasoning capability.
+# Set to true only if you want to benchmark the non-thinking mode specifically.
+suppress_thinking = false
+#
+# quantization is auto-detected from the model ID for LM Studio (e.g. "qwen3.6-35b-q4_k_m"
+# → "Q4_K_M"). Ollama and llama.cpp don't embed the quant in the model ID, so set it
+# manually here if you want it tracked in the dashboard:
+# quantization      = "Q4_K_M"
+#
+# architecture is optional — set it if you know it, otherwise leave commented out
+# architecture      = "gated-delta"
+#
+# lm-eval needs a HuggingFace tokenizer to count tokens.
+# Set this to a compatible HF model ID — only tokenizer files are downloaded (~few MB).
+# Examples: "Qwen/Qwen2.5-0.5B", "google/gemma-2-2b", "meta-llama/Meta-Llama-3-8B"
+# lmeval_tokenizer  = "Qwen/Qwen2.5-0.5B"

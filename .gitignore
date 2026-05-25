@@ -21,4 +21,9 @@ venv/
 
 # Benchmark outputs — each user generates their own
 results/*.json
+results/*.db
+results/lmeval/
 analysis/charts/
+
+# Venv with space in name
+.venv 2/

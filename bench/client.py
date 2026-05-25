@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from bench.timing import _build_payload  # noqa: F401 — re-exported for backwards compat
+
 
 @dataclass
 class ClientConfig:

@@ -1,297 +1,353 @@
-# Positional Recall Benchmark
+# LLM Benchmarker
 
-Reproduces the benchmark from the YouTube video (see `benchmark_plan.md`):
-stuff a large source corpus into an LLM's context, then ask it to reproduce
-the first N lines of specific named functions verbatim. Measures positional
-recall under long context, not just named-entity lookup.
+A comprehensive local LLM evaluation platform. Runs standardized coding and reasoning benchmarks, long-context recall tests, and speed profiling — all on your own hardware at the quantizations you actually use. Results are stored in a SQLite database and visualized in a local web dashboard.
 
-[video walkthrough](https://youtu.be/zBYfzecY5ww)
+Built on top of [codeneedle](https://github.com/alexziskind1/codeneedle).
 
-## Install
+---
 
-This project uses [uv](https://docs.astral.sh/uv/) for Python environment management.
+## What It Tests
 
-```
-# Create a venv in .venv/ and install the deps from requirements.txt
-uv venv
-uv pip install -r requirements.txt
-```
+| Benchmark | What it measures | Tool |
+|---|---|---|
+| **Coding (Python)** | HumanEval+, MBPP+ — execution-based pass@1 | lm-eval |
+| **Reasoning** | GSM8K (math), BBH (75q/subtask), IFEval (instruction following) | lm-eval |
+| **Long Context Recall** | Reproduce a named function from a 80K+ token file verbatim | codeneedle |
+| **Speed Profiling** | Prefill + generation tokens/sec across 1K–128K context sizes | custom |
 
-Run any project script via `uv run` (no `source .venv/bin/activate` needed):
+---
 
-```
-uv run python bench.py run --corpus http_server --model qwen36-35b
-uv run python analysis/visualize.py
-uv run python smoke_test.py
-```
+## Requirements
 
-If you'd rather activate the venv:
+- Python 3.11+
+- [LM Studio](https://lmstudio.ai/) (or any OpenAI-compatible local server)
+- macOS / Linux
 
-```
-source .venv/bin/activate
-python3 bench.py run --corpus http_server --model qwen36-35b
-```
+---
 
-The rest of this README writes commands as `python3 …` for brevity — prepend
-`uv run ` if your venv isn't active.
+## Setup
 
-## Docker (Optional)
-
-Start interactive bash session with all dependencies already pre-installed
-
-```sh
-docker compose run --rm app
-```
-
-Now you can use ether `uv run` or `python` directly
-
-Close interactive shell by pressing `CTRL-d` or typing `exit` plus `RETURN`
-
-## Quick start
-
-```
-# 1. (LM Studio only) make sure your model is loaded with enough context.
-#    Defaults can silently sit at 4K. Force-reload at 128K:
-lms unload qwen3.6-35b-a3b
-lms load qwen3.6-35b-a3b --context-length 131072 --gpu max -y
-
-# 2. Pick a corpus + a model and run them (assumes .venv is active; otherwise prepend `uv run`):
-python3 bench.py run --corpus http_server --model qwen36-35b
-
-# 3. Result is auto-saved as results/<corpus>__<model>.json.
-```
-
-## Layout
-
-```
-configs/
-  corpora/        what files to test, sample size — one TOML per corpus
-  models/         model identifier and per-model knobs — one TOML per model
-fixtures/         source files to test against (jquery.js, http_server.py, …)
-results/          JSON dumps from every run, auto-named <corpus>__<model>.json
-analysis/
-  visualize.py    Plotly dashboard builder
-  charts/         generated HTML output (gitignored)
-  VIZ_README.md   chart-by-chart explanation + how to extend
-.secrets/         API keys for hosted endpoints (gitignored, perms 700)
-bench/            package internals
-bench.py          CLI entry
-```
-
-## Configs
-
-The split is by axis-of-change. You rarely change which files to test, but
-you constantly compare different models — so an N×M comparison needs only
-N+M files, not N*M.
-
-### Hosted models — API keys
-
-Don't put real keys in committed config files. The recommended workflow:
+### 1. Create a virtual environment
 
 ```bash
-mkdir -p .secrets && chmod 700 .secrets
-echo 'sk-...' > .secrets/openai.key
-chmod 600 .secrets/openai.key
+cd "LLM Benchmarker"
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-Then reference it from a model config:
+### 2. Install dependencies
+
+```bash
+# Core codeneedle deps
+pip install -r requirements.txt
+
+# Extended deps (FastAPI dashboard + lm-eval)
+pip install -r requirements-extended.txt
+```
+
+> **Note:** `lm-eval` installs many dependencies and may take a few minutes.
+
+### 3. Configure your model
+
+Model configs live in `configs/models/`. Two are included:
+
+**`local.toml`** — universal auto-detect config. Load any model in LM Studio and use `--model local`. The tool automatically reads the model name and quantization from LM Studio's API — no manual editing needed.
+
+**`qwen36-35b-lmstudio.toml`** — explicit config for Qwen 3.6 35B A3B at Q4_K_M.
+
+To add a new model, copy an existing config:
+
+```bash
+cp configs/models/local.toml configs/models/my-model.toml
+```
 
 ```toml
-# configs/models/gpt-5.5.toml
-name              = "gpt-5.5"
-base_url          = "https://api.openai.com"
-api_key_file      = ".secrets/openai.key"   # path resolved from repo root
-temperature       = 1.0
-max_tokens        = 8000
-reasoning_effort  = "none"
-use_max_completion_tokens = true
+# configs/models/my-model.toml
+name             = "llama-3.1-8b-instruct"   # must match the model ID in your server
+base_url         = "http://127.0.0.1:1234"
+api_key          = "lm-studio"
+temperature      = 0.0
+max_tokens       = 32768
+timeout          = 600.0
+runtime          = "local"
+quantization     = "Q4_K_M"        # label shown in dashboard
+architecture     = "standard"      # "standard", "gated-delta", "sliding-window", "moe"
+hardware         = "M3 Max 36GB"   # optional label
+lmeval_tokenizer = "meta-llama/Meta-Llama-3.1-8B"  # see Tokenizer section below
 ```
 
-`.secrets/` and any `*.key` file are already in `.gitignore`. Verify with
-`git check-ignore -v .secrets/openai.key` — you should see a match.
+**For cloud APIs** (Claude, OpenAI):
 
-Alternatives: `api_key_env = "OPENAI_API_KEY"` (read from environment), or
-`api_key = "..."` (literal — only for non-secret tokens like LM Studio's
-`"not-needed"` placeholder).
+```toml
+# configs/models/claude-opus.toml
+name        = "claude-opus-4-7"
+base_url    = "https://api.anthropic.com"
+api_key_env = "ANTHROPIC_API_KEY"   # reads from environment variable
+temperature = 0.0
+max_tokens  = 8000
+timeout     = 120.0
+runtime     = "anthropic"
+```
 
-Full hosted-model details and known per-API quirks:
-[`configs/CONFIG_README.md → Hosted models`](configs/CONFIG_README.md#hosted-models--api-keys-and-security).
+> Use `api_key_env` (reads from env var) or `api_key_file` (reads from file path). Never hardcode keys.
 
-> Field-by-field reference for every TOML key, plus recipes for adding a new
-> corpus or model, lives in [`configs/CONFIG_README.md`](configs/CONFIG_README.md).
+---
 
-### Corpora — `configs/corpora/<name>.toml`
+## Running Benchmarks
+
+Make sure your model server is running before starting any benchmark.
+
+### Long Context Recall
+
+Tests whether the model can reproduce a named function verbatim from a large source file loaded into context. The key challenge: 16 functions sampled from across an 80K+ token file, testing whether recall degrades at different positions.
+
+```bash
+# Quick test (~2 min) — small Python HTTP server file
+python3 bench.py recall --corpus http_server --model local
+
+# Full test (~10–30 min) — jQuery, ~80K tokens
+python3 bench.py recall --corpus jquery --model local
+
+# Run each function 3 times and average results
+python3 bench.py recall --corpus jquery --model local --runs 3
+```
+
+Results are saved to `results/<corpus>__<model>.json` and to `results/benchmark.db`.
+
+### Coding Benchmarks (lm-eval)
+
+Requires lm-eval (`pip install -r requirements-extended.txt`).
+
+```bash
+# Python coding — HumanEval+ and MBPP+ (~538 problems total)
+python3 bench.py lmeval --suite coding-standard --model local
+
+# Multi-language coding — 7 languages via MultiPL-E
+python3 bench.py lmeval --suite coding-multilang --model local
+
+# Reasoning — GSM8K (math), BBH, MMLU-Pro
+python3 bench.py lmeval --suite reasoning --model local
+
+# Run all three suites back to back
+python3 bench.py lmeval --suite all --model local
+```
+
+> These take a long time on local models. `coding-standard` alone is ~538 problems. Plan for several hours per suite. Results are saved to `results/lmeval/` and imported into the DB automatically.
+
+### Speed Profiling
+
+Measures how inference speed changes as context grows from 1K to 128K tokens.
+
+```bash
+# Default: 7 context sizes (1K, 4K, 8K, 16K, 32K, 64K, 128K), 3 samples each
+python3 bench.py speed --model local
+
+# Custom context sizes and sample count
+python3 bench.py speed --model local --context-sizes 1024,4096,8192,32768 --samples 5
+```
+
+Prints a live table:
+```
+Speed profiling 'local' across 7 context sizes
+Samples per size: 3
+   Context   Prefill t/s     Gen t/s   Overall t/s     TTFT
+----------------------------------------------------------
+      1024        3200.0        42.1           N/A      N/A
+      4096        1800.0        41.3           N/A      N/A
+      8192         950.0        40.1           N/A      N/A
+     32768         240.0        35.2           N/A      N/A
+```
+
+> `Prefill t/s` and `Gen t/s` are only available when running against llama.cpp directly. LM Studio and cloud APIs show `N/A` for those and populate `Overall t/s` instead.
+
+### Run Everything
+
+Runs recall → coding-standard → reasoning → speed in sequence.
+
+```bash
+python3 bench.py run-all --model local --corpus jquery
+```
+
+This will take several hours on a large model. Kick it off overnight.
+
+---
+
+## Estimated Benchmark Time
+
+Times below are for the full suite: **Coding** (HumanEval+ + MBPP+) + **Reasoning** (BBH 75q/subtask + GSM8K 300q + IFEval 541q) + **Speed Profiler**. Estimates assume `max_tokens = 2048` and a single concurrent request.
+
+| Model size | Typical generation speed | Full suite (near worst case) |
+|---|---|---|
+| ~2B | 120–200 t/s | ~10h |
+| 4–9B | 60–120 t/s | ~10–12h |
+| 14–35B MoE | 40–70 t/s | ~12–15h |
+| 27–35B dense | 25–40 t/s | ~15–20h |
+| 70B+ | 10–20 t/s | ~22–28h |
+
+> **Note:** Benchmark time can vary drastically between models of the same reported generation speed. Factors include quantization level, architecture (MoE vs dense), hardware, and how verbose the model's chain-of-thought is. Generation speed (t/s) alone is not a reliable predictor — per-request overhead and input context processing time contribute significantly. The table above reflects near-worst-case real-world measurements.
+
+### Import Existing lm-eval Results
+
+If you've already run lm-eval manually and have the output directory, import it:
+
+```bash
+python3 bench.py import-lmeval \
+  --path results/lmeval/coding-standard__local__abc12345/ \
+  --model local \
+  --suite-name coding-standard
+```
+
+---
+
+## Dashboard
+
+```bash
+python3 bench.py serve
+```
+
+Opens at **http://127.0.0.1:8000**
+
+| Tab | What you see |
+|---|---|
+| **Overview** | Radar chart comparing all models across recall, HumanEval+, GSM8K, and speed |
+| **Coding** | HumanEval+ and MBPP+ leaderboard with error bars |
+| **Multi-Language** | Heatmap of pass@1 scores across 7 languages |
+| **Reasoning** | GSM8K, BBH, IFEval leaderboard |
+| **Long Context** | Recall leaderboard + depth degradation chart |
+| **Speed** | Speed curves (tokens/sec vs context size) + bar chart at fixed context |
+| **Quant Impact** | Select a model to compare Q4 vs Q8 vs F16 across all metrics side by side |
+
+Use the filter bar at the top to filter by runtime, quantization, or architecture.
+
+---
+
+## Comparing Quantizations
+
+The main reason this tool exists. To empirically measure how quantization affects real performance:
+
+1. Load Q4_K_M in LM Studio → `python3 bench.py run-all --model local --corpus jquery`
+2. Load Q8_0 in LM Studio → `python3 bench.py run-all --model local --corpus jquery`
+3. `python3 bench.py serve` → open the **Quant Impact** tab
+
+`local.toml` auto-detects the loaded model name and quantization from LM Studio's `/v1/models` API each time, so results are stored with the correct label without any manual editing.
+
+Alternatively, create explicit configs for each quant if you want full control:
+
+```bash
+# configs/models/qwen36-q4.toml  →  quantization = "Q4_K_M"
+# configs/models/qwen36-q8.toml  →  quantization = "Q8_0"
+
+python3 bench.py run-all --model qwen36-q4 --corpus jquery
+python3 bench.py run-all --model qwen36-q8 --corpus jquery
+python3 bench.py serve
+```
+
+---
+
+## Project Structure
+
+```
+LLM Benchmarker/
+├── bench.py                    # Main CLI — all subcommands
+├── bench/
+│   ├── config.py               # Model config loading (TOML)
+│   ├── runner.py               # Long-context recall benchmark runner
+│   ├── scorer.py               # Line-level LCS scoring
+│   ├── extract.py              # Function extraction (JS + Python)
+│   ├── timing.py               # Per-runtime timing adapter
+│   ├── db.py                   # Unified SQLite storage
+│   ├── lmeval_runner.py        # lm-eval subprocess wrapper
+│   ├── speed_profiler.py       # Speed curve measurement
+│   └── known_architectures.py  # Model family → architecture lookup
+├── configs/
+│   ├── corpora/                # Recall test corpus configs
+│   ├── models/                 # Model connection configs (one per model/quant)
+│   └── lmeval/                 # lm-eval task suite configs
+├── fixtures/                   # Source files used in recall + speed tests
+├── results/
+│   ├── benchmark.db            # All results (SQLite)
+│   ├── *.json                  # Per-run recall JSON dumps
+│   └── lmeval/                 # Raw lm-eval output directories
+├── webapp/
+│   ├── main.py                 # FastAPI app
+│   ├── routes/api.py           # Dashboard API (10 routes)
+│   └── static/                 # index.html, app.js, style.css
+├── requirements.txt            # Core deps (codeneedle)
+└── requirements-extended.txt   # FastAPI + lm-eval
+```
+
+---
+
+## Adding a Custom Corpus
+
+To test recall on your own large source file:
+
+1. Put the file in `fixtures/` (`.js` or `.py`)
+2. Create `configs/corpora/myfile.toml`:
 
 ```toml
 [files]
-directory = "fixtures"   # required
-glob      = "*.js"       # required
-limit     = 1            # optional cap on matched files (sorted lexically)
+directory = "fixtures"
+glob      = "myfile.js"
 
 [sample]
-k    = 16                # number of functions to test
+k    = 16   # number of functions to sample
 seed = 42
 ```
 
-Shipped:
-- `http_server` — single ~50KB Python file, fits any context, fast iteration
-- `jquery` — ~280KB / ~80K-token JS, closest to the video's setup (needs ≥100K loaded context)
+3. Run: `python3 bench.py recall --corpus myfile --model local`
 
-If `glob` matches multiple files, they're concatenated with comment-marker
-headers (`# === path ===` / `// === path ===`) so the model sees file
-boundaries. Cross-file name collisions are deduplicated (first occurrence
-wins), and the prompt qualifies by file path when more than one file is in play.
+---
 
-### Models — `configs/models/<name>.toml`
+## lm-eval Tokenizer
+
+lm-eval needs a tokenizer to count tokens in prompts before sending them to your local server. It downloads only the tokenizer files from HuggingFace (~a few MB) — **not** the model weights. After the first download it caches locally and works offline.
+
+Set `lmeval_tokenizer` in your model config to a compatible HuggingFace model ID:
 
 ```toml
-name              = "qwen3.6-35b-a3b"      # required (model id the server knows)
-base_url          = "http://localhost:1234"
-api_key           = "not-needed"           # optional
-temperature       = 0.0
-max_tokens        = 6000                   # leave room for reasoning models
-timeout           = 600.0
-suppress_thinking = true                   # appends /no_think (harmless when ignored)
+# Qwen models (3.5, 3.6, 2.5, etc.)
+lmeval_tokenizer = "Qwen/Qwen2.5-0.5B"
+
+# Gemma 4
+lmeval_tokenizer = "google/gemma-3-27b-it"
+
+# Llama 3.x  ← requires HuggingFace login (see note below)
+lmeval_tokenizer = "meta-llama/Meta-Llama-3.1-8B"
+
+# Mistral
+lmeval_tokenizer = "mistralai/Mistral-7B-v0.1"
+
+# DeepSeek
+lmeval_tokenizer = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+
+# Phi-3 / Phi-4
+lmeval_tokenizer = "microsoft/Phi-3-mini-4k-instruct"
 ```
 
-Shipped:
-- `qwen3-4b` — small, honors `/no_think`, `max_tokens=1500` is fine
-- `qwen36-35b` — reasoning-on-by-default, ignores every thinking-disable knob; needs `max_tokens=6000`
+The key is picking a tokenizer from the **same model family** — you don't need an exact match, just the same tokenizer type. For Qwen 3.6 we use `Qwen/Qwen2.5-0.5B` because it's the smallest model in the family and the tokenizer is identical.
 
-If you pass `--model FOO` and there's no matching config file, FOO is treated
-as a raw model identifier with sane defaults — so you don't *have* to write a
-config to do a one-off run, but for repeated use it's worth pinning the knobs.
+**For cloud APIs (Claude, OpenAI, Anthropic):** you don't need `lmeval_tokenizer` at all. Setting `runtime = "anthropic"` or `runtime = "openai"` routes lm-eval to use its native backends which handle tokenization internally.
 
-### How the two configs combine at run time
-
-Every `run` invocation needs **one corpus** (`--corpus NAME` or `--file PATH`)
-and **one model** (`--model NAME`). They're resolved independently and stitched
-together — there is no shared parent file or inheritance.
-
-**Resolution order**, for both flags:
-1. If the value points to an existing file on disk, load it.
-2. Otherwise look it up by name under `configs/corpora/<name>.toml` or
-   `configs/models/<name>.toml`.
-3. (`--model` only) If still not found, treat the value as a raw model
-   identifier and use built-in defaults. A note is printed so you know the
-   fallback was taken.
-
-**Override layering**, applied in order (later wins):
-1. defaults baked into the loader (`max_tokens=6000`, `temperature=0`, …)
-2. fields set in the **model config** file
-3. CLI overrides — `--base-url`, `--max-tokens`, `--temperature`, `--timeout`,
-   `--api-key`
-4. sampling overrides (`-k`, `--seed`) layer over the **corpus config**'s
-   `[sample]` the same way
-
-This means model knobs can come from anywhere on the chain. A typical config
-sets the model-specific defaults (e.g. `max_tokens=6000` for a reasoning model)
-and you override per-run knobs (`--max-tokens 8000` for a hard case) without
-editing the file.
-
-**`--think`** flips one bit: it inverts `suppress_thinking` so chain-of-thought
-is left on. Useful when you specifically want to compare reasoning vs.
-no-reasoning recall on a model that supports both.
-
-**Output filename** is `results/<corpus.name>__<model.name>.json`, where each
-`name` is the **config stem** (filename without `.toml`). Raw-model fallback
-sanitizes the identifier (`/` → `_`). Override the whole path with `--dump`.
-
-Mental model: corpus = *what to ask*, model = *who to ask and how*. Keep them
-orthogonal.
-
-## Commands
-
+**Llama models require a HuggingFace login** because Meta gates access. Before running lm-eval with a Llama tokenizer:
+```bash
+pip install huggingface_hub
+huggingface-cli login   # paste your HF token when prompted
 ```
-# Run a benchmark
-python3 bench.py run --corpus http_server --model qwen36-35b
+Get a token at https://huggingface.co/settings/tokens (free account). Then accept the Llama license at the model page on HuggingFace before downloading.
 
-# Compare models on the same corpus
-python3 bench.py run --corpus jquery --model qwen3-4b
-python3 bench.py run --corpus jquery --model qwen36-35b
+---
 
-# Override anything from the CLI
-python3 bench.py run --corpus jquery --model qwen36-35b -k 8 --max-tokens 8000
+## Troubleshooting
 
-# Test only specific functions (skips sampling)
-python3 bench.py run --corpus http_server --model qwen36-35b \
-    --function is_cgi --function translate_path
+**"No model loaded in LM Studio"** — Make sure a model is fully loaded in LM Studio before running. The tool pings `/v1/models` on startup and fails fast if nothing is there.
 
-# Use a raw model identifier (no config file needed)
-python3 bench.py run --corpus http_server --model "qwen/qwen3-4b"
+**"lm-eval not installed" / "FastAPI not installed"** — Activate your venv and run `pip install -r requirements-extended.txt`.
 
-# Single-file mode (no corpus config)
-python3 bench.py run --file fixtures/http_server.py --model qwen36-35b
+**lm-eval task not found** — Task names change between lm-eval versions. Check what's available: `lm_eval --tasks list | grep humaneval`. Update `configs/lmeval/*.toml` if needed.
 
-# See what would be tested
-python3 bench.py extract --corpus http_server          # sampled
-python3 bench.py extract --corpus http_server --all    # every extractable function
-python3 bench.py extract --corpus http_server --show is_cgi   # ground truth
+**Speed profiler shows N/A for prefill/gen** — Expected for LM Studio and cloud APIs. Only raw llama.cpp exposes the prefill/generation split. `Overall t/s` is available for all runtimes.
 
-# Re-score a prior dump without re-querying
-python3 bench.py rescore results/http_server__qwen36-35b.json
+**System Python blocked (PEP 668 error)** — Use a virtual environment: `python3 -m venv .venv && source .venv/bin/activate`.
 
-# Build Plotly dashboards comparing every run in results/
-python3 analysis/visualize.py
-# -> analysis/charts/<corpus>.html + analysis/charts/index.html
-# (see analysis/VIZ_README.md for what each chart shows)
-```
-
-Supported source languages: `.js`, `.mjs`, `.cjs` (esprima), `.py` (`ast`).
-
-## Reading the output
-
-Per-function diff uses colors matching the video:
-
-- **gray**       — matched line (expected + produced at correct position)
-- **orange**     — expected but missing from the output
-- **yellow**     — hallucinated / mangled line
-- **blue/cyan**  — extra correct lines past the primary 20 (bonus)
-
-Pass threshold per function: ≥ 8 of the 20 expected lines matched.
-
-## Server setup notes
-
-For fair comparison matching the video:
-
-- **llama.cpp**: `--ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0`,
-  prompt caching on (default in recent builds).
-- **LM Studio**: set context length to cover the file, enable "KV cache quantization"
-  → Q8. Prefix cache is automatic.
-- **Ollama**: set `num_ctx` via Modelfile or per-request; no KV quant yet, so
-  comparison isn't apples-to-apples.
-
-Keep temperature at 0. Default `max_tokens=6000` to leave room for reasoning models.
-
-### LM Studio gotchas we hit (read before debugging)
-
-1. **`lms ps` lies about context size after JIT loads.** If large prompts fail
-   with a 400 "context length" error despite `lms ps` showing a big number,
-   force-reload:
-   ```
-   lms unload <model>
-   lms load <model> --context-length 131072 --gpu max -y
-   ```
-2. **Auto-unload by idle TTL** (default ~60 min). After it expires, the next
-   request triggers a JIT reload at *default settings*, silently dropping your
-   large context. Either disable TTL in the LM Studio UI or re-load before
-   each session.
-3. **Reasoning models** (qwen3.5, qwen3.6, …) do not honor `/no_think`,
-   `enable_thinking: false`, `reasoning_effort: "none"`, or any other API toggle
-   we tested. The benchmark still appends `/no_think` (harmless if ignored), but
-   you must give the budget for chain-of-thought *plus* the answer. Default
-   `max_tokens=6000`; bump to 8000+ if responses come back empty.
-
-## Module map
-
-- `benchmark_plan.md` — analysis of what the benchmark measures and why
-- `bench.py` — CLI entry
-- `bench/config.py` — TOML config loader
-- `bench/extract.py` — function extraction + multi-file source aggregation
-- `bench/client.py` — tiny OpenAI-compatible client
-- `bench/scorer.py` — LCS alignment, line classification, pass/fail
-- `bench/report.py` — ANSI color rendering
-- `bench/runner.py` — orchestration: prompt assembly, query, score, dump
-- `analysis/visualize.py` — builds Plotly HTML dashboards from `results/*.json`
-  (see [`analysis/VIZ_README.md`](analysis/VIZ_README.md) for chart-by-chart details)
-- `smoke_test.py` — end-to-end sanity check without an LLM
+**Benchmarks are very slow** — Long-context recall and lm-eval are inherently slow on local hardware. Use `--corpus http_server` instead of `jquery` for faster recall tests. For lm-eval, `coding-standard` runs faster than `coding-multilang` (fewer problems).

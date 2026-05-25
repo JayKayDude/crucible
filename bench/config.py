@@ -63,6 +63,21 @@ class ModelConfig:
     client: ClientConfig
     suppress_thinking: bool = True
     relax_indent: bool = False    # score with leading-whitespace ignored on both sides — for models that strip indentation (Gemma 4)
+    quantization: str | None = None
+    # e.g. "Q4_K_M", "Q8_0", "F16", "BF16", "Q4_K_XL"
+    architecture: str | None = None
+    # e.g. "gated-delta", "sliding-window", "standard", "moe"
+    runtime: str = "openai-compat"
+    # "llama.cpp" | "lm-studio" | "mlx" | "openai" | "anthropic" | "local" | "openai-compat"
+    stream_for_ttft: bool = False
+    # use SSE streaming to measure time-to-first-token
+    runs_per_function: int = 1
+    # multi-run averaging; 1 = original codeneedle behavior
+    hardware: str | None = None
+    # optional: "M3 Max 36GB", "RTX 4090", etc. stored in DB for context
+    lmeval_tokenizer: str | None = None
+    # HuggingFace model ID for lm-eval tokenizer (e.g. "Qwen/Qwen2.5-0.5B")
+    # lm-eval downloads only tokenizer files (~few MB), not model weights
 
 
 # --- resolution -----------------------------------------------------------
@@ -144,15 +159,14 @@ def _resolve_api_key(raw: dict, config_path: Path) -> str:
 
 def load_model_from_file(path: Path) -> ModelConfig:
     raw = tomllib.loads(path.read_text())
-    if "name" not in raw:
-        raise ValueError(f"{path}: required field `name` (model identifier) is missing")
     stop_raw = raw.get("stop")
     if stop_raw is not None and not isinstance(stop_raw, list):
         raise ValueError(f"{path}: `stop` must be a list of strings if set")
     api_key = _resolve_api_key(raw, path)
+    model_name = raw.get("name", path.stem)
     client = ClientConfig(
         base_url=raw.get("base_url", "http://localhost:1234"),
-        model=raw["name"],
+        model=model_name,
         api_key=api_key,
         temperature=float(raw.get("temperature", 0.0)),
         max_tokens=int(raw.get("max_tokens", 6000)),
@@ -162,12 +176,20 @@ def load_model_from_file(path: Path) -> ModelConfig:
         stop=stop_raw,
         use_max_completion_tokens=bool(raw.get("use_max_completion_tokens", False)),
     )
-    return ModelConfig(
-        name=path.stem,
+    cfg = ModelConfig(
+        name=raw.get("name", path.stem),
         client=client,
         suppress_thinking=bool(raw.get("suppress_thinking", True)),
         relax_indent=bool(raw.get("relax_indent", False)),
     )
+    cfg.quantization      = raw.get("quantization")
+    cfg.architecture      = raw.get("architecture")
+    cfg.runtime           = raw.get("runtime", "openai-compat")
+    cfg.stream_for_ttft   = bool(raw.get("stream_for_ttft", False))
+    cfg.runs_per_function = int(raw.get("runs_per_function", 1))
+    cfg.hardware          = raw.get("hardware")
+    cfg.lmeval_tokenizer  = raw.get("lmeval_tokenizer")
+    return cfg
 
 
 def load_model(name_or_path: str | Path) -> tuple[ModelConfig, bool]:
