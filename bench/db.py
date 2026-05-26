@@ -397,6 +397,14 @@ def query_lmeval_leaderboard(
 
     rows = conn.execute(
         f"""
+        WITH latest_runs AS (
+            SELECT run_id, model_config_id, task_suite,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY model_config_id, task_suite
+                       ORDER BY created_at DESC
+                   ) AS rn
+            FROM lmeval_runs
+        )
         SELECT
             mc.model_name,
             mc.config_name,
@@ -409,10 +417,11 @@ def query_lmeval_leaderboard(
             res.value,
             res.stderr,
             res.n_samples
-        FROM lmeval_runs lr
+        FROM latest_runs lr
         JOIN model_configs mc ON mc.id = lr.model_config_id
         JOIN lmeval_results res ON res.run_id = lr.run_id
-        WHERE {" AND ".join(where)}
+        WHERE lr.rn = 1
+          AND {" AND ".join(where)}
         ORDER BY mc.config_name, res.task
         """,
         params,
@@ -600,7 +609,7 @@ def query_overview(conn: sqlite3.Connection) -> list[dict]:
                AND res.task = 'ifeval'
                AND res.metric = 'prompt_level_strict_acc,none'
              ORDER BY lr2.created_at DESC LIMIT 1) AS ifeval,
-            (SELECT sm.generation_tps_mean
+            (SELECT COALESCE(sm.generation_tps_mean, sm.overall_tps_mean)
              FROM speed_runs sr2
              JOIN speed_measurements sm ON sm.run_id = sr2.run_id
              WHERE sr2.model_config_id = mc.id

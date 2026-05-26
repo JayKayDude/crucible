@@ -12,13 +12,23 @@
 <header>
   <h1>LLM Benchmarker</h1>
   <span>Local model evaluation — coding, reasoning, context, speed</span>
+  <span id="sse-indicator" class="sse-dot disconnected" title="Live updates disconnected"></span>
+  <span id="last-synced" class="last-synced"></span>
 </header>
+
+<div id="refresh-banner" class="refresh-banner hidden">
+  <span>New data available — auto-refreshing in <span id="banner-countdown">60</span>s</span>
+  <button id="banner-refresh">Refresh Now</button>
+  <button id="banner-cancel">Cancel</button>
+</div>
 
 <div id="filters">
   <span class="filter-label">Filters:</span>
   <select id="filter-runtime"><option value="">All runtimes</option></select>
   <select id="filter-quant"><option value="">All quantizations</option></select>
   <select id="filter-arch"><option value="">All architectures</option></select>
+  <button id="model-filter-toggle" class="filter-btn">Filter Models ▾</button>
+  <div id="model-filter-panel" class="model-filter-panel hidden"></div>
 </div>
 
 <nav id="tabs">
@@ -34,24 +44,29 @@
 
   <div id="tab-overview" class="tab-content active">
     <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-radar"></div>
       <div id="chart-radar" style="height:500px"></div>
+      <div id="score-cards" class="score-cards-container"></div>
     </div>
   </div>
 
   <div id="tab-coding" class="tab-content">
     <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-coding-leaderboard"></div>
       <div id="chart-coding-leaderboard" style="height:400px"></div>
     </div>
   </div>
 
   <div id="tab-reasoning" class="tab-content">
     <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-reasoning-leaderboard"></div>
       <div id="chart-reasoning-leaderboard" style="height:400px"></div>
     </div>
   </div>
 
   <div id="tab-recall" class="tab-content">
     <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-recall-leaderboard"></div>
       <div id="chart-recall-leaderboard" style="height:400px"></div>
     </div>
     <div class="chart-container">
@@ -59,6 +74,7 @@
         <span>Depth chart for run:</span>
         <select id="filter-depth-run"><option value="">select a run</option></select>
       </div>
+      <div class="chart-spinner hidden" id="spinner-recall-depth"></div>
       <div id="chart-recall-depth" style="height:350px"></div>
     </div>
   </div>
@@ -66,9 +82,11 @@
   <div id="tab-speed" class="tab-content">
     <div class="chart-row">
       <div class="chart-container">
+        <div class="chart-spinner hidden" id="spinner-speed-curves"></div>
         <div id="chart-speed-curves" style="height:400px"></div>
       </div>
       <div class="chart-container">
+        <div class="chart-spinner hidden" id="spinner-speed-bar"></div>
         <div id="chart-speed-bar" style="height:400px"></div>
       </div>
     </div>
@@ -80,6 +98,7 @@
       <select id="filter-quant-model"><option value="">select model</option></select>
     </div>
     <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-quant-impact"></div>
       <div id="chart-quant-impact" style="height:400px"></div>
     </div>
   </div>

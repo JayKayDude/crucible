@@ -1,10 +1,12 @@
 """API routes for the LLM Benchmarker dashboard."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from bench.db import (
     get_db,
@@ -16,6 +18,14 @@ from bench.db import (
     query_recall_leaderboard,
     query_speed_curves,
 )
+
+_LAST_UPDATED_SQL = """
+SELECT MAX(ts) AS ts FROM (
+    SELECT MAX(created_at) AS ts FROM recall_runs
+    UNION ALL SELECT MAX(created_at) FROM lmeval_runs
+    UNION ALL SELECT MAX(created_at) FROM speed_runs
+)
+"""
 
 router = APIRouter()
 
@@ -265,3 +275,53 @@ def get_runs(
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Live update endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/last-updated")
+def get_last_updated(request: Request) -> dict:
+    conn = _db(request)
+    try:
+        row = conn.execute(_LAST_UPDATED_SQL).fetchone()
+        return {"ts": row["ts"] or ""}
+    finally:
+        conn.close()
+
+
+@router.get("/events")
+async def sse_events(request: Request):
+    """Server-Sent Events stream — pushes an update event when new benchmark results land."""
+    db_path: Path = request.app.state.db_path
+
+    async def generator():
+        last_ts = None
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                conn = get_db(db_path)
+                try:
+                    row = conn.execute(_LAST_UPDATED_SQL).fetchone()
+                    current_ts = row["ts"] or ""
+                finally:
+                    conn.close()
+
+                if last_ts is None:
+                    last_ts = current_ts
+                elif current_ts != last_ts:
+                    last_ts = current_ts
+                    yield f'data: {{"type":"update","ts":"{current_ts}"}}\n\n'
+
+                yield ": heartbeat\n\n"
+                await asyncio.sleep(5)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
