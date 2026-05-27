@@ -36,6 +36,8 @@
   <button class="tab" data-tab="reasoning">Reasoning</button>
   <button class="tab" data-tab="recall">Long Context</button>
   <button class="tab" data-tab="speed">Speed</button>
+  <button class="tab" data-tab="run">Run</button>
+  <button class="tab" data-tab="models">Models</button>
 </nav>
 
 <div id="content">
@@ -100,6 +102,48 @@
     </div>
   </div>
 
+  <div id="tab-run" class="tab-content">
+    <div class="run-config-panel">
+      <div class="run-row">
+        <label>Model config</label>
+        <select id="run-model"></select>
+        <label>Corpus (Recall)</label>
+        <select id="run-corpus"></select>
+      </div>
+      <div class="run-row">
+        <label>Quantization override</label>
+        <input id="run-quant" type="text" placeholder="e.g. Q8_0 (blank = use config)">
+        <label>Architecture</label>
+        <input id="run-arch" type="text" placeholder="auto-detect" list="arch-datalist">
+        <datalist id="arch-datalist"></datalist>
+      </div>
+      <div class="run-row">
+        <label>Benchmarks</label>
+        <label class="suite-toggle"><input type="checkbox" id="run-all-toggle" checked> All</label>
+        <label class="suite-toggle"><input type="checkbox" value="recall" checked> Recall</label>
+        <label class="suite-toggle"><input type="checkbox" value="coding" checked> Coding</label>
+        <label class="suite-toggle"><input type="checkbox" value="reasoning" checked> Reasoning</label>
+        <label class="suite-toggle"><input type="checkbox" value="speed" checked> Speed</label>
+      </div>
+      <div class="run-row">
+        <button id="run-btn" class="run-btn">&#9654; Run Benchmarks</button>
+        <span id="run-note" class="run-note hidden">&#9888; Another run is already active</span>
+      </div>
+    </div>
+    <div id="run-cards"></div>
+  </div>
+
+  <div id="tab-models" class="tab-content">
+    <div class="models-split">
+      <div class="models-sidebar">
+        <button id="model-new-btn" class="filter-btn">+ New</button>
+        <div id="model-list"></div>
+      </div>
+      <div id="model-editor" class="model-editor">
+        <span class="empty-state">Select a config to edit</span>
+      </div>
+    </div>
+  </div>
 
 </div>
 

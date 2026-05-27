@@ -70,6 +70,7 @@ let _reasoningData   = [];
 let _bbhModels            = []; // models currently shown in BBH drilldown
 let _recallModels         = []; // keys currently shown in recall drilldown (max 2)
 let _recallLeaderboardData = [];
+const _runSources = {};  // run_id → EventSource
 
 // ─────────────────────────────────────────────
 // Plotly base layout
@@ -93,13 +94,22 @@ function getFilters() {
   };
 }
 
-async function fetchAPI(path, params = {}) {
-  const clean = Object.fromEntries(
-    Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== "")
-  );
-  const qs = new URLSearchParams(clean).toString();
-  const url = `/api${path}${qs ? "?" + qs : ""}`;
-  const resp = await fetch(url);
+async function fetchAPI(path, params = {}, method = "GET") {
+  const url = `/api${path}`;
+  let resp;
+  if (method === "GET") {
+    const clean = Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== "")
+    );
+    const qs = new URLSearchParams(clean).toString();
+    resp = await fetch(`${url}${qs ? "?" + qs : ""}`);
+  } else {
+    resp = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+  }
   if (!resp.ok) throw new Error(`API error ${resp.status}: ${url}`);
   return resp.json();
 }
@@ -112,9 +122,10 @@ function emptyChart(divId, msg = "No data yet — run a benchmark first") {
 
 function modelLabel(row) {
   const name = row.model_name || row.config_name;
-  return row.quantization && !name.toLowerCase().includes(row.quantization.toLowerCase())
-    ? `${name} (${row.quantization})`
-    : name;
+  const quant = row.quantization && !name.toLowerCase().includes(row.quantization.toLowerCase())
+    ? ` (${row.quantization})` : "";
+  const hw = row.hardware ? ` · ${row.hardware}` : "";
+  return `${name}${quant}${hw}`;
 }
 
 function showSpinner(chartId) {
@@ -139,7 +150,7 @@ function sortedByValue(rows, key) {
 function applyModelFilter(rows) {
   if (!_modelFilter) return rows;
   return rows.filter(r => {
-    const key = (r.model_name || r.config_name || "") + "|" + (r.quantization || "");
+    const key = (r.model_name || r.config_name || "") + "|" + (r.quantization || "") + "|" + (r.hardware || "");
     return _modelFilter.has(key);
   });
 }
@@ -308,22 +319,28 @@ function buildModelFilterPanel(modelQuants) {
   allLabel.appendChild(document.createTextNode(" All models"));
   panel.appendChild(allLabel);
 
-  // Group by model_name
+  // Group by model_name; each entry is { quantization, hardware }
   const groups = {};
-  modelQuants.forEach(({ model_name, quantization }) => {
+  modelQuants.forEach(({ model_name, quantization, hardware }) => {
     if (!groups[model_name]) groups[model_name] = [];
-    groups[model_name].push(quantization);
+    groups[model_name].push({ quantization: quantization || "", hardware: hardware || "" });
   });
 
-  Object.entries(groups).forEach(([modelName, quants]) => {
-    if (quants.length === 1) {
-      const key = modelName + "|" + quants[0];
+  Object.entries(groups).forEach(([modelName, entries]) => {
+    const childLabel = entry => {
+      const hw = entry.hardware ? ` · ${entry.hardware}` : "";
+      return (entry.quantization || "unknown") + hw;
+    };
+
+    if (entries.length === 1) {
+      const e = entries[0];
+      const key = modelName + "|" + e.quantization + "|" + e.hardware;
       const label = document.createElement("label");
       const cb = document.createElement("input");
       cb.type = "checkbox"; cb.checked = true; cb.dataset.key = key;
       cb.addEventListener("change", updateModelFilter);
       label.appendChild(cb);
-      label.appendChild(document.createTextNode(" " + modelName + (quants[0] ? ` (${quants[0]})` : "")));
+      label.appendChild(document.createTextNode(" " + modelName + (e.quantization ? ` (${childLabel(e)})` : "")));
       panel.appendChild(label);
     } else {
       const parentLabel = document.createElement("label");
@@ -334,17 +351,17 @@ function buildModelFilterPanel(modelQuants) {
       parentLabel.appendChild(document.createTextNode(" " + modelName));
       panel.appendChild(parentLabel);
 
-      quants.forEach(quant => {
-        const key = modelName + "|" + quant;
-        const childLabel = document.createElement("label");
-        childLabel.className = "mf-child";
+      entries.forEach(e => {
+        const key = modelName + "|" + e.quantization + "|" + e.hardware;
+        const child = document.createElement("label");
+        child.className = "mf-child";
         const childCb = document.createElement("input");
         childCb.type = "checkbox"; childCb.checked = true;
         childCb.dataset.key = key; childCb.dataset.parentModel = modelName;
         childCb.addEventListener("change", () => { _syncParent(modelName); updateModelFilter(); });
-        childLabel.appendChild(childCb);
-        childLabel.appendChild(document.createTextNode(" " + (quant || "unknown")));
-        panel.appendChild(childLabel);
+        child.appendChild(childCb);
+        child.appendChild(document.createTextNode(" " + childLabel(e)));
+        panel.appendChild(child);
       });
 
       parentCb.addEventListener("change", e => {
@@ -924,6 +941,321 @@ async function renderSpeed() {
 // ─────────────────────────────────────────────
 
 // ─────────────────────────────────────────────
+// Tab: Run
+// ─────────────────────────────────────────────
+
+let _runTabInitialized = false;
+
+async function renderRun() {
+  if (!_runTabInitialized) {
+    _runTabInitialized = true;
+
+    // Populate model dropdown
+    const models = await fetchAPI("/config/models").catch(() => []);
+    const modelSel = document.getElementById('run-model');
+    if (modelSel) {
+      modelSel.innerHTML = '';
+      models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        modelSel.appendChild(opt);
+      });
+    }
+
+    // Populate corpus dropdown
+    const corpora = await fetchAPI("/config/corpora").catch(() => []);
+    const corpusSel = document.getElementById('run-corpus');
+    if (corpusSel) {
+      corpusSel.innerHTML = '';
+      corpora.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        corpusSel.appendChild(opt);
+      });
+    }
+
+    // Populate architecture datalist
+    const archs = await fetchAPI("/config/architectures").catch(() => ({}));
+    const datalist = document.getElementById('arch-datalist');
+    if (datalist) {
+      const unique = [...new Set(Object.values(archs))];
+      unique.forEach(v => {
+        const opt = document.createElement('option');
+        opt.value = v;
+        datalist.appendChild(opt);
+      });
+    }
+
+    // Suite toggle logic
+    const allToggle = document.getElementById('run-all-toggle');
+    if (allToggle) {
+      allToggle.addEventListener('change', e => {
+        document.querySelectorAll('.suite-toggle input[type=checkbox]:not(#run-all-toggle)').forEach(cb => {
+          cb.checked = e.target.checked;
+        });
+      });
+    }
+    document.querySelectorAll('.suite-toggle input[value]').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const all = [...document.querySelectorAll('.suite-toggle input[value]')];
+        const checked = all.filter(c => c.checked).length;
+        const allToggleEl = document.getElementById('run-all-toggle');
+        if (allToggleEl) {
+          if (checked === all.length) {
+            allToggleEl.checked = true;
+            allToggleEl.indeterminate = false;
+          } else if (checked === 0) {
+            allToggleEl.checked = false;
+            allToggleEl.indeterminate = false;
+          } else {
+            allToggleEl.checked = false;
+            allToggleEl.indeterminate = true;
+          }
+        }
+      });
+    });
+
+    // Run button
+    const runBtn = document.getElementById('run-btn');
+    if (runBtn) {
+      runBtn.addEventListener('click', async () => {
+        const model = document.getElementById('run-model').value;
+        const corpus = document.getElementById('run-corpus').value;
+        const suites = [...document.querySelectorAll('.suite-toggle input[value]')]
+          .filter(cb => cb.checked).map(cb => cb.value);
+        const quantization = document.getElementById('run-quant').value || null;
+        const architecture = document.getElementById('run-arch').value || null;
+        if (!model || !suites.length) return;
+        try {
+          const { run_id } = await fetchAPI("/run", { model, corpus, suites, quantization, architecture }, "POST");
+          const label = `${model} · ${suites.join('+')}`;
+          spawnRunCard(run_id, label);
+          document.getElementById('run-note').classList.add('hidden');
+        } catch (e) {
+          console.error('Run failed:', e);
+        }
+      });
+    }
+  }
+
+  // Check for active runs each time tab is shown
+  try {
+    const active = await fetchAPI("/run/active");
+    const noteEl = document.getElementById('run-note');
+    if (noteEl) {
+      const hasRunning = Array.isArray(active) && active.some(r => r.status === 'running');
+      if (hasRunning) noteEl.classList.remove('hidden');
+      else noteEl.classList.add('hidden');
+    }
+  } catch (_) {}
+}
+
+function spawnRunCard(run_id, label) {
+  const card = document.createElement('div');
+  card.className = 'run-card';
+  card.id = `run-card-${run_id}`;
+  const startedAt = Date.now();
+  card.innerHTML = `
+    <div class="run-card-header">
+      <span class="run-status-dot running" id="dot-${run_id}"></span>
+      <span class="run-card-title">${label}</span>
+      <span class="run-card-age" id="age-${run_id}">just now</span>
+      <button class="run-cancel-btn" id="cancel-${run_id}">Cancel</button>
+      <button class="run-dismiss-btn" id="dismiss-${run_id}">&#x2715;</button>
+    </div>
+    <pre class="run-log" id="log-${run_id}"></pre>
+  `;
+  document.getElementById('run-cards').prepend(card);
+
+  // Age timer
+  const ageInterval = setInterval(() => {
+    const el = document.getElementById(`age-${run_id}`);
+    if (!el) { clearInterval(ageInterval); return; }
+    const s = Math.floor((Date.now() - startedAt) / 1000);
+    el.textContent = s < 60 ? `${s}s ago` : `${Math.floor(s/60)}m ago`;
+  }, 5000);
+
+  // SSE log stream
+  const src = new EventSource(`/api/run/${run_id}/logs`);
+  _runSources[run_id] = src;
+  src.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'log') {
+      const log = document.getElementById(`log-${run_id}`);
+      if (log) { log.textContent += data.line + '\n'; log.scrollTop = log.scrollHeight; }
+    } else if (data.type === 'done') {
+      src.close(); delete _runSources[run_id];
+      const dot = document.getElementById(`dot-${run_id}`);
+      if (dot) { dot.className = 'run-status-dot done'; }
+      const cancelBtn = document.getElementById(`cancel-${run_id}`);
+      if (cancelBtn) cancelBtn.style.display = 'none';
+      const ageEl = document.getElementById(`age-${run_id}`);
+      if (ageEl) ageEl.textContent = 'Done';
+      clearInterval(ageInterval);
+    }
+  };
+  src.onerror = () => {
+    const dot = document.getElementById(`dot-${run_id}`);
+    if (dot && dot.classList.contains('running')) dot.className = 'run-status-dot error';
+    src.close(); delete _runSources[run_id];
+  };
+
+  // Cancel button
+  document.getElementById(`cancel-${run_id}`).addEventListener('click', async () => {
+    await fetchAPI(`/run/${run_id}`, {}, "DELETE");
+    if (_runSources[run_id]) { _runSources[run_id].close(); delete _runSources[run_id]; }
+    const dot = document.getElementById(`dot-${run_id}`);
+    if (dot) dot.className = 'run-status-dot cancelled';
+    document.getElementById(`cancel-${run_id}`).style.display = 'none';
+    clearInterval(ageInterval);
+  });
+
+  // Dismiss button
+  document.getElementById(`dismiss-${run_id}`).addEventListener('click', async () => {
+    if (_runSources[run_id]) {
+      await fetchAPI(`/run/${run_id}`, {}, "DELETE").catch(() => {});
+      _runSources[run_id].close(); delete _runSources[run_id];
+    }
+    clearInterval(ageInterval);
+    document.getElementById(`run-card-${run_id}`)?.remove();
+  });
+}
+
+// ─────────────────────────────────────────────
+// Tab: Models
+// ─────────────────────────────────────────────
+
+async function renderModels() {
+  const models = await fetchAPI("/config/models").catch(() => []);
+  const list = document.getElementById('model-list');
+  list.innerHTML = '';
+  models.forEach(m => {
+    const item = document.createElement('div');
+    item.className = 'model-list-item';
+    item.dataset.name = m.name;
+    item.textContent = m.name;
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
+      item.classList.add('active');
+      openModelEditor(m.name);
+    });
+    list.appendChild(item);
+  });
+  document.getElementById('model-new-btn').onclick = () => {
+    document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
+    openModelEditor(null);
+  };
+}
+
+async function openModelEditor(name) {
+  const editor = document.getElementById('model-editor');
+  const data = name ? await fetchAPI(`/config/models/${name}`).catch(() => ({})) : {};
+  const isNew = !name;
+  let showingAdvanced = false;
+
+  const FIELDS = [
+    'base_url','api_key','api_key_file','runtime',
+    'temperature','max_tokens','timeout','quantization',
+    'architecture','lmeval_tokenizer','suppress_thinking',
+    'stream_for_ttft','reasoning_effort','use_max_completion_tokens'
+  ];
+  const BOOL_FIELDS = new Set(['suppress_thinking','stream_for_ttft','use_max_completion_tokens']);
+
+  function renderForm() {
+    editor.innerHTML = `
+      <div class="model-editor-title">${isNew ? 'New Model Config' : `Editing: ${name}`}</div>
+      ${isNew ? '<div class="model-field"><label>Config name</label><input id="mf-name" type="text" placeholder="e.g. my-model"></div>' : ''}
+      <div class="model-editor-grid">
+        ${FIELDS.map(f => `
+          <div class="model-field">
+            <label>${f}</label>
+            ${BOOL_FIELDS.has(f)
+              ? `<select id="mf-${f}"><option value="">—</option><option value="true" ${data[f]===true?'selected':''}>true</option><option value="false" ${data[f]===false?'selected':''}>false</option></select>`
+              : `<input id="mf-${f}" type="text" value="${data[f] ?? ''}" placeholder="${f}">`
+            }
+          </div>`).join('')}
+      </div>
+      <div class="model-editor-actions">
+        <button id="me-save" class="run-btn">Save</button>
+        <button id="me-advanced" class="detail-btn">Advanced (Raw TOML)</button>
+        <button id="me-cancel" class="detail-btn">Cancel</button>
+      </div>
+    `;
+    document.getElementById('me-cancel').onclick = () => {
+      editor.innerHTML = '<span class="empty-state">Select a config to edit</span>';
+      document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
+    };
+    document.getElementById('me-advanced').onclick = () => {
+      showingAdvanced = !showingAdvanced;
+      if (showingAdvanced) renderAdvanced();
+      else renderForm();
+    };
+    document.getElementById('me-save').onclick = () => saveModel(false);
+  }
+
+  function renderAdvanced() {
+    const tomlLines = FIELDS.map(f => {
+      const val = data[f];
+      if (val === null || val === undefined || val === '') return null;
+      if (typeof val === 'boolean') return `${f} = ${val}`;
+      if (typeof val === 'number') return `${f} = ${val}`;
+      return `${f} = "${val}"`;
+    }).filter(Boolean).join('\n');
+    editor.innerHTML = `
+      <div class="model-editor-title">${isNew ? 'New Model Config' : `Editing: ${name}`} — Raw TOML</div>
+      ${isNew ? `<div class="model-field"><label>Config name</label><input id="mf-name" type="text" placeholder="e.g. my-model" value="${data.name||''}"></div>` : ''}
+      <textarea id="mf-toml" class="model-toml-textarea" rows="18">${tomlLines}</textarea>
+      <div class="model-editor-actions">
+        <button id="me-save" class="run-btn">Save</button>
+        <button id="me-advanced" class="detail-btn">Structured Form</button>
+        <button id="me-cancel" class="detail-btn">Cancel</button>
+      </div>
+    `;
+    document.getElementById('me-cancel').onclick = () => {
+      editor.innerHTML = '<span class="empty-state">Select a config to edit</span>';
+      document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
+    };
+    document.getElementById('me-advanced').onclick = () => { showingAdvanced = false; renderForm(); };
+    document.getElementById('me-save').onclick = () => saveModel(true);
+  }
+
+  async function saveModel(fromAdvanced) {
+    let payload = {};
+    const configName = isNew ? (document.getElementById('mf-name')?.value.trim()) : name;
+    if (!configName) { alert('Config name required'); return; }
+    if (fromAdvanced) {
+      payload = { _raw_toml: document.getElementById('mf-toml').value };
+    } else {
+      FIELDS.forEach(f => {
+        const el = document.getElementById(`mf-${f}`);
+        if (!el) return;
+        const v = el.value.trim();
+        if (v === '') return;
+        if (BOOL_FIELDS.has(f)) payload[f] = v === 'true';
+        else if (!isNaN(v) && v !== '') payload[f] = Number(v);
+        else payload[f] = v;
+      });
+    }
+    try {
+      if (isNew) {
+        payload.name = configName;
+        await fetchAPI("/config/models", payload, "POST");
+      } else {
+        await fetchAPI(`/config/models/${configName}`, payload, "PUT");
+      }
+      await renderModels();
+      editor.innerHTML = '<span class="empty-state">Saved!</span>';
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    }
+  }
+
+  renderForm();
+}
+
+// ─────────────────────────────────────────────
 // Initialization
 // ─────────────────────────────────────────────
 
@@ -955,6 +1287,8 @@ function renderCurrentTab() {
     reasoning: renderReasoning,
     recall:    renderRecallLeaderboard,
     speed:     renderSpeed,
+    run:       renderRun,
+    models:    renderModels,
   };
   const fn = renderers[_currentTab];
   if (fn) fn().catch(err => console.error("Chart error:", err));

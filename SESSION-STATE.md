@@ -1,74 +1,60 @@
 # Session State
 
-**Last Updated:** 2026-05-25
-**Status:** Complete — all benchmarks run, repo live on GitHub
+**Last Updated:** 2026-05-27
+**Status:** Active development — dashboard feature work in progress
 
 ## Current Position
 
-All benchmarks complete for Gemma 4 E2B. Dashboard running at http://127.0.0.1:8000.
-GitHub repo live at https://github.com/JayKayDude/crucible.
+Dashboard is fully functional at http://127.0.0.1:8000 with the following tabs live:
+Overview, Coding, Reasoning, Long Context, Speed, Run, Models.
 
-## Benchmark Results — Gemma 4 E2B (google/gemma-4-e2b, Q4_K_M)
+**Next task:** Implement the **Data tab** — per-run browser with shift-select, inline metadata editing (quant/hardware), single-run detail expand, and bulk delete.
 
-| Benchmark | Score | Details |
-|---|---|---|
-| **HumanEval+** | TBD | coding-standard run in earlier session |
-| **MBPP+** | TBD | coding-standard run in earlier session |
-| **BBH** | **74.6%** ±0.84% | 2,025 questions (27 subtasks × 75) |
-| **GSM8K** | **74.3%** ±2.5% | 300 questions |
-| **IFEval** | **80.2%** prompt-strict / **81.3%** prompt-loose | 541 questions |
-| **Recall** | TBD | codeneedle jquery corpus, earlier session |
-| **Speed** | 135.5 t/s @ 1K → 57.5 t/s @ 64K | 7 context sizes, 3 samples each |
+## Benchmark Results — Gemma 4 E2B
 
-Speed curve: 986→135.5, 4K→127.6, 8K→119.3, 16K→102.6, 32K→80.7, 64K→57.5, 75K→62.3 t/s
-Note: 128K context test capped at ~75K tokens (jquery.js fixture too short).
+| Model | Quant | HumanEval+ | BBH | GSM8K | IFEval | Recall (jquery) | Recall (http_server) | Speed @8K |
+|---|---|---|---|---|---|---|---|---|
+| google/gemma-4-e2b | Q4_K_M | 47.6% | 74.3% | 74.3% | 80.2% | 31.3% | — | 119.3 t/s |
+| google/gemma-4-e2b | Q8_0 | 54.3% | 75.7% | 83.2% | 80.2% | 25.0% (jquery) | 18.2% (http_server) | 125.9 t/s |
 
-## Key Changes This Session (2026-05-25)
+## Dashboard Features Completed (2026-05-27)
 
-- **Reasoning suite finalized**: BBH=75/subtask, GSM8K=300, IFEval=541, MMLU Pro removed
-- **Per-task limits**: `lmeval_runner.py` split-mode — each task group runs as a separate subprocess, merged under one `run_id`
-- **CLI `--limit` override**: overrides all per-task TOML limits (useful for quick tests)
-- **coding-multilang removed from default suite**: `--suite all` = coding-standard + reasoning only
-- **Multi-Language tab removed from dashboard**: HTML + JS renderer entry removed
-- **GitHub repo created**: https://github.com/JayKayDude/crucible (36 files, 3,729 insertions)
-- **`.gitignore` updated**: excludes results DB, lm-eval outputs, venv with space in name
+- **Run tab**: launch benchmarks from UI, per-run cards with live SSE log streaming, Cancel, Dismiss
+- **Models tab**: TOML config editor with structured form + raw TOML toggle, create/edit/delete
+- **Recall drilldown**: horizontal grouped bar chart, per-function pass rates, 2-model comparison
+- **Hardware differentiation**: `(model_name, runtime, quantization, hardware)` is the unique key for model_configs — different hardware = separate entries on all charts
+- **Filter panel**: hierarchical model filter shows `Q8_0 · Apple M5` style entries when hardware is set
+- **`modelLabel()`**: appends ` · {hardware}` suffix when hardware is non-empty
+- **Bug fix**: `POST /api/run` 405 error — changed `@router.post("/")` to `@router.post("")` to avoid spa_fallback catch-all conflict
 
-## All Fixes Applied (Cumulative)
+## Key Architectural Facts (dashboard)
 
-- **lm_eval binary path**: searches venv candidates in priority order
-- **HF_DATASETS_OFFLINE removed**: datasets download on first run, cached locally
-- **HuggingFace cache pinned out of iCloud**: `xattr -w com.apple.fileprovider.ignore#P 1 ~/.cache/huggingface`
-- **reasoning num_fewshot=0**: BBH cot_zeroshot variants designed for 0-shot
-- **system instruction scoped to coding suites only**
-- **GSM8K variant**: `gsm8k_cot_zeroshot` (scores "The answer is X" format)
-- **BBH variant**: `bbh_cot_zeroshot` (0-shot, flexible extraction)
-- **max_gen_toks=2048**: prevents thinking models from running for days
-- **venv outside iCloud**: lives at `~/llm-benchmarker-venv`, symlinked as `.venv 2`
-- **MMLU Pro removed**: tests knowledge recall, not reasoning ability
-- **IFEval added**: 541-question instruction-following benchmark
+- `webapp/routes/run_routes.py` — run management (POST /api/run, GET /api/run/{id}/logs SSE, DELETE /api/run/{id})
+- `webapp/routes/config_routes.py` — model TOML CRUD (GET/PUT/POST/DELETE /api/config/models)
+- `webapp/main.py` — CORS allows GET/POST/PUT/DELETE; `app.state.run_state = {}` initialized in `serve()`
+- `bench/db.py` unique key migration: (model_name, runtime) → (model_name, runtime, quantization) → (model_name, runtime, quantization, hardware)
+- `hardware` stored as `""` (empty string, not NULL) to work correctly in UNIQUE constraints
+- `query_speed_curves`, `query_recall_leaderboard`, `query_lmeval_leaderboard`, `query_overview` all SELECT `mc.hardware`
 
-## Pending Work (Next Session)
+## Pending Work
 
-1. **Check coding-standard scores** for Gemma 4 E2B in DB (ran in earlier session)
-2. **Run full suite on a second model** (load different model in LM Studio, run `run-all`)
-3. **Verify Quant Impact tab** by running same model at different quantizations
+1. **Data tab** — per-run browser (see plan file)
+2. Run full suite on a second model for comparison
 
 ## Key Commands
 
 ```bash
-# Run full suite on any loaded model
-".venv 2/bin/python3" bench.py run-all --model local --corpus jquery
-
-# Individual benchmarks
-".venv 2/bin/python3" bench.py lmeval --suite reasoning --model local
-".venv 2/bin/python3" bench.py speed --model local
-".venv 2/bin/python3" bench.py recall --corpus jquery --model local
-
 # Dashboard
-".venv 2/bin/python3" bench.py serve   # → http://127.0.0.1:8000
+source ".venv 2/bin/activate" && python3 bench.py serve   # → http://127.0.0.1:8000
+
+# Run individual benchmarks
+python3 bench.py speed --model local
+python3 bench.py recall --corpus jquery --model local
+python3 bench.py recall --corpus http_server --model local
+python3 bench.py lmeval --suite reasoning --model local
+python3 bench.py run-all --model local --corpus jquery
 ```
 
 ## Venv Location
 
-The venv lives at `~/llm-benchmarker-venv` (outside iCloud — 0.918s-per-file read penalty inside iCloud).
-Symlinked into project as `.venv 2`. Always use `".venv 2/bin/python3"`.
+Lives at `~/llm-benchmarker-venv` (outside iCloud). Symlinked as `.venv 2`. Always activate with `source ".venv 2/bin/activate"`.

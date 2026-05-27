@@ -334,3 +334,182 @@ select {
   margin-right: 8px;
 }
 .bbh-add-model:hover { border-color: #6366f1; }
+
+/* ── Run tab ── */
+.run-config-panel {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.run-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.run-row label { font-size: 0.78rem; color: #9ca3af; }
+.run-row input[type="text"] {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #e0e0e0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  width: 180px;
+}
+.run-btn {
+  background: #6366f1;
+  border: none;
+  color: #fff;
+  padding: 6px 20px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.run-btn:hover { background: #4f46e5; }
+.run-note { font-size: 0.78rem; color: #f59e0b; }
+.suite-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.8rem;
+  color: #e0e0e0;
+  cursor: pointer;
+}
+
+/* ── Run cards ── */
+#run-cards { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.run-card {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.run-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #2a2d3a;
+}
+.run-card-title { font-size: 0.82rem; color: #e0e0e0; flex: 1; }
+.run-card-age { font-size: 0.72rem; color: #6b7280; }
+.run-cancel-btn {
+  background: #374151;
+  border: none;
+  color: #e0e0e0;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.run-cancel-btn:hover { background: #4b5563; }
+.run-dismiss-btn {
+  background: none;
+  border: none;
+  color: #6b7280;
+  font-size: 1rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 2px;
+}
+.run-dismiss-btn:hover { color: #e0e0e0; }
+.run-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.run-status-dot.running {
+  background: #10b981;
+  animation: sse-pulse 2s ease-in-out infinite;
+}
+.run-status-dot.done { background: #10b981; }
+.run-status-dot.error, .run-status-dot.cancelled { background: #ef4444; }
+.run-log {
+  padding: 10px 14px;
+  overflow-y: auto;
+  max-height: 320px;
+  font-size: 0.74rem;
+  color: #10b981;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  font-family: "SF Mono", "Fira Code", monospace;
+}
+
+/* ── Models tab ── */
+.models-split {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 16px;
+  min-height: 500px;
+}
+.models-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#model-list {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.model-list-item {
+  padding: 9px 14px;
+  font-size: 0.82rem;
+  color: #d1d5db;
+  cursor: pointer;
+  border-bottom: 1px solid #2a2d3a;
+  transition: background 0.1s;
+}
+.model-list-item:last-child { border-bottom: none; }
+.model-list-item:hover { background: #252836; }
+.model-list-item.active { background: #252836; color: #c4b5fd; font-weight: 500; }
+.model-editor {
+  background: #1a1d27;
+  border: 1px solid #2a2d3a;
+  border-radius: 8px;
+  padding: 16px;
+}
+.model-editor-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #e0e0e0;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #2a2d3a;
+}
+.model-editor-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.model-field { display: flex; flex-direction: column; gap: 4px; }
+.model-field label { font-size: 0.72rem; color: #9ca3af; }
+.model-field input, .model-field select {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #e0e0e0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+}
+.model-toml-textarea {
+  width: 100%;
+  background: #0f1117;
+  border: 1px solid #374151;
+  color: #10b981;
+  padding: 10px;
+  border-radius: 6px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.78rem;
+  resize: vertical;
+  margin-bottom: 4px;
+}
+.model-editor-actions { display: flex; gap: 8px; margin-top: 12px; }

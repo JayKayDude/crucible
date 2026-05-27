@@ -81,6 +81,24 @@ python3 bench.py import-lmeval --path results/lmeval/some_run/ --model local
 - **GSM8K limit: 300** — down from 1,319; ~1h at Gemma E2B speed. Acceptable MoE (±2.8%).
 - **IFEval: no limit** — all 541 questions; fast and uniform response length.
 
+## Dashboard Architecture (webapp/)
+
+- **Routes:** `webapp/routes/api.py` (data queries), `run_routes.py` (run management), `config_routes.py` (TOML CRUD)
+- **Run management:** `POST /api/run` spawns bench.py subprocess, streams stdout via SSE at `GET /api/run/{id}/logs`; in-memory state in `app.state.run_state`
+- **Config CRUD:** `GET/PUT/POST/DELETE /api/config/models` — hand-rolled TOML writer (no tomlkit); reads via stdlib `tomllib`
+- **CORS:** allows GET/POST/PUT/DELETE in `webapp/main.py`
+- **Route gotcha:** use `@router.post("")` not `@router.post("/")` — a `GET /{path:path}` catch-all in main.py intercepts the 307 redirect and returns 405
+
+## Hardware Differentiation
+
+- **Unique key:** `model_configs` is keyed on `(model_name, runtime, quantization, hardware)` — same model on different hardware = separate DB entries
+- **`hardware` field:** stored as `""` (empty string, not NULL) — NULL != NULL in SQL UNIQUE constraints would create duplicates
+- **All queries** (`query_speed_curves`, `query_recall_leaderboard`, `query_lmeval_leaderboard`, `query_overview`) SELECT `mc.hardware` and pass it to the frontend
+- **`modelLabel(row)`** in app.js: appends ` · {hardware}` suffix when `row.hardware` is non-empty
+- **Filter panel key:** `model_name|quantization|hardware` — hardware-differentiated entries show as `Q8_0 · Apple M5` in the filter list
+- **`applyModelFilter`** matches on the same 3-part key
+- **`get_speed_comparison`** key includes hardware: `(model_name, quantization, hardware)` — prevents hardware variants from overwriting each other in bar chart
+
 ## Key Implementation Fixes (from real runs)
 
 - **venv inside iCloud = 3.5hr startup**: 13k+ YAML files at 0.918s each. Fix: venv at `~/llm-benchmarker-venv`.

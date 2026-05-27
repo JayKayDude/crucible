@@ -29,9 +29,9 @@ CREATE TABLE IF NOT EXISTS model_configs (
     architecture    TEXT,
     runtime         TEXT NOT NULL DEFAULT 'openai-compat',
     base_url        TEXT,
-    hardware        TEXT,
+    hardware        TEXT NOT NULL DEFAULT '',
     created_at      TEXT NOT NULL,
-    UNIQUE(model_name, runtime, quantization)
+    UNIQUE(model_name, runtime, quantization, hardware)
 );
 
 CREATE TABLE IF NOT EXISTS recall_runs (
@@ -131,39 +131,70 @@ CREATE INDEX IF NOT EXISTS idx_speed_runs_model     ON speed_runs(model_config_i
 # ---------------------------------------------------------------------------
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Migrate model_configs unique key from (model_name, runtime) to (model_name, runtime, quantization)."""
+    """Run incremental schema migrations for model_configs unique key changes."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='model_configs'"
     ).fetchone()
     if not row:
         return
-    if "UNIQUE(model_name, runtime, quantization)" in row["sql"]:
-        return  # already migrated
 
-    conn.executescript("""
-        PRAGMA foreign_keys=OFF;
-        BEGIN;
-        CREATE TABLE model_configs_new (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            config_name     TEXT NOT NULL,
-            model_name      TEXT NOT NULL,
-            quantization    TEXT NOT NULL DEFAULT '',
-            architecture    TEXT,
-            runtime         TEXT NOT NULL DEFAULT 'openai-compat',
-            base_url        TEXT,
-            hardware        TEXT,
-            created_at      TEXT NOT NULL,
-            UNIQUE(model_name, runtime, quantization)
-        );
-        INSERT INTO model_configs_new
-            SELECT id, config_name, model_name, COALESCE(quantization,''),
-                   architecture, runtime, base_url, hardware, created_at
-            FROM model_configs;
-        DROP TABLE model_configs;
-        ALTER TABLE model_configs_new RENAME TO model_configs;
-        COMMIT;
-        PRAGMA foreign_keys=ON;
-    """)
+    sql = row["sql"]
+
+    # Migration 1: (model_name, runtime) → (model_name, runtime, quantization)
+    if "UNIQUE(model_name, runtime, quantization)" not in sql and "UNIQUE(model_name, runtime)" in sql:
+        conn.executescript("""
+            PRAGMA foreign_keys=OFF;
+            BEGIN;
+            CREATE TABLE model_configs_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_name     TEXT NOT NULL,
+                model_name      TEXT NOT NULL,
+                quantization    TEXT NOT NULL DEFAULT '',
+                architecture    TEXT,
+                runtime         TEXT NOT NULL DEFAULT 'openai-compat',
+                base_url        TEXT,
+                hardware        TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                UNIQUE(model_name, runtime, quantization, hardware)
+            );
+            INSERT INTO model_configs_new
+                SELECT id, config_name, model_name, COALESCE(quantization,''),
+                       architecture, runtime, base_url, COALESCE(hardware,''), created_at
+                FROM model_configs;
+            DROP TABLE model_configs;
+            ALTER TABLE model_configs_new RENAME TO model_configs;
+            COMMIT;
+            PRAGMA foreign_keys=ON;
+        """)
+        return
+
+    # Migration 2: (model_name, runtime, quantization) → (model_name, runtime, quantization, hardware)
+    if "UNIQUE(model_name, runtime, quantization, hardware)" not in sql:
+        conn.executescript("""
+            PRAGMA foreign_keys=OFF;
+            BEGIN;
+            CREATE TABLE model_configs_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_name     TEXT NOT NULL,
+                model_name      TEXT NOT NULL,
+                quantization    TEXT NOT NULL DEFAULT '',
+                architecture    TEXT,
+                runtime         TEXT NOT NULL DEFAULT 'openai-compat',
+                base_url        TEXT,
+                hardware        TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                UNIQUE(model_name, runtime, quantization, hardware)
+            );
+            INSERT INTO model_configs_new
+                SELECT id, config_name, model_name, COALESCE(quantization,''),
+                       architecture, runtime, base_url, COALESCE(hardware,''), created_at
+                FROM model_configs;
+            DROP TABLE model_configs;
+            ALTER TABLE model_configs_new RENAME TO model_configs;
+            COMMIT;
+            PRAGMA foreign_keys=ON;
+        """)
+        return
 
 
 def get_db(db_path: Path) -> sqlite3.Connection:
@@ -190,20 +221,20 @@ def _new_run_id() -> str:
 # ---------------------------------------------------------------------------
 
 def upsert_model_config(conn: sqlite3.Connection, model_cfg) -> int:
-    """Insert or update model_configs row. Keyed on (model_name, runtime, quantization). Returns row id."""
+    """Insert or update model_configs row. Keyed on (model_name, runtime, quantization, hardware). Returns row id."""
     model_name = getattr(model_cfg, "model_name", model_cfg.name)
     runtime = getattr(model_cfg, "runtime", "openai-compat")
     quantization = getattr(model_cfg, "quantization", None) or ""
+    hardware = getattr(model_cfg, "hardware", None) or ""
     conn.execute(
         """
         INSERT INTO model_configs
             (config_name, model_name, quantization, architecture, runtime, base_url, hardware, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(model_name, runtime, quantization) DO UPDATE SET
+        ON CONFLICT(model_name, runtime, quantization, hardware) DO UPDATE SET
             config_name  = excluded.config_name,
             architecture = excluded.architecture,
-            base_url     = excluded.base_url,
-            hardware     = excluded.hardware
+            base_url     = excluded.base_url
         """,
         (
             model_cfg.name,
@@ -212,14 +243,14 @@ def upsert_model_config(conn: sqlite3.Connection, model_cfg) -> int:
             getattr(model_cfg, "architecture", None),
             runtime,
             getattr(model_cfg.client, "base_url", None) if hasattr(model_cfg, "client") else None,
-            getattr(model_cfg, "hardware", None),
+            hardware,
             _now(),
         ),
     )
     conn.commit()
     row = conn.execute(
-        "SELECT id FROM model_configs WHERE model_name = ? AND runtime = ? AND quantization = ?",
-        (model_name, runtime, quantization),
+        "SELECT id FROM model_configs WHERE model_name = ? AND runtime = ? AND quantization = ? AND hardware = ?",
+        (model_name, runtime, quantization, hardware),
     ).fetchone()
     return row["id"]
 
@@ -334,6 +365,7 @@ def query_recall_leaderboard(
             mc.quantization,
             mc.runtime,
             mc.architecture,
+            mc.hardware,
             rr.corpus,
             COUNT(DISTINCT rr.run_id)    AS n_runs,
             AVG(res.pass_rate)           AS pass_rate,
@@ -455,6 +487,7 @@ def query_lmeval_leaderboard(
             mc.quantization,
             mc.runtime,
             mc.architecture,
+            mc.hardware,
             lr.task_suite,
             res.task,
             res.metric,
@@ -595,6 +628,7 @@ def query_speed_curves(
             mc.config_name,
             mc.quantization,
             mc.runtime,
+            mc.hardware,
             sm.context_tokens,
             AVG(sm.prefill_tps_mean)      AS prefill_tps_mean,
             AVG(sm.prefill_tps_stddev)    AS prefill_tps_stddev,
@@ -629,6 +663,7 @@ def query_overview(conn: sqlite3.Connection) -> list[dict]:
             mc.quantization,
             mc.runtime,
             mc.architecture,
+            mc.hardware,
             (SELECT AVG(res.pass_rate)
              FROM recall_runs rr2
              JOIN recall_results res ON res.run_id = rr2.run_id
@@ -676,9 +711,9 @@ def query_filter_options(conn: sqlite3.Connection) -> dict:
         ]
 
     model_quants = [
-        {"model_name": r[0], "quantization": r[1]}
+        {"model_name": r[0], "quantization": r[1], "hardware": r[2]}
         for r in conn.execute(
-            "SELECT DISTINCT model_name, quantization FROM model_configs ORDER BY model_name, quantization"
+            "SELECT DISTINCT model_name, quantization, hardware FROM model_configs ORDER BY model_name, quantization, hardware"
         ).fetchall()
     ]
     return {

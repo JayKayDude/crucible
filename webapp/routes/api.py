@@ -211,7 +211,7 @@ def get_speed_comparison(
         # Find closest available context size for each model
         result = {}
         for row in all_curves:
-            key = (row["model_name"], row.get("quantization"))
+            key = (row["model_name"], row.get("quantization"), row.get("hardware", ""))
             current_dist = abs(row["context_tokens"] - context_tokens)
             if key not in result or abs(result[key]["context_tokens"] - context_tokens) > current_dist:
                 result[key] = row
