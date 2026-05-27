@@ -25,13 +25,13 @@ CREATE TABLE IF NOT EXISTS model_configs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     config_name     TEXT NOT NULL,
     model_name      TEXT NOT NULL,
-    quantization    TEXT,
+    quantization    TEXT NOT NULL DEFAULT '',
     architecture    TEXT,
     runtime         TEXT NOT NULL DEFAULT 'openai-compat',
     base_url        TEXT,
     hardware        TEXT,
     created_at      TEXT NOT NULL,
-    UNIQUE(model_name, runtime)
+    UNIQUE(model_name, runtime, quantization)
 );
 
 CREATE TABLE IF NOT EXISTS recall_runs (
@@ -130,11 +130,48 @@ CREATE INDEX IF NOT EXISTS idx_speed_runs_model     ON speed_runs(model_config_i
 # Connection management
 # ---------------------------------------------------------------------------
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Migrate model_configs unique key from (model_name, runtime) to (model_name, runtime, quantization)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='model_configs'"
+    ).fetchone()
+    if not row:
+        return
+    if "UNIQUE(model_name, runtime, quantization)" in row["sql"]:
+        return  # already migrated
+
+    conn.executescript("""
+        PRAGMA foreign_keys=OFF;
+        BEGIN;
+        CREATE TABLE model_configs_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_name     TEXT NOT NULL,
+            model_name      TEXT NOT NULL,
+            quantization    TEXT NOT NULL DEFAULT '',
+            architecture    TEXT,
+            runtime         TEXT NOT NULL DEFAULT 'openai-compat',
+            base_url        TEXT,
+            hardware        TEXT,
+            created_at      TEXT NOT NULL,
+            UNIQUE(model_name, runtime, quantization)
+        );
+        INSERT INTO model_configs_new
+            SELECT id, config_name, model_name, COALESCE(quantization,''),
+                   architecture, runtime, base_url, hardware, created_at
+            FROM model_configs;
+        DROP TABLE model_configs;
+        ALTER TABLE model_configs_new RENAME TO model_configs;
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+    """)
+
+
 def get_db(db_path: Path) -> sqlite3.Connection:
     """Open DB, create schema if new, enable WAL and FK enforcement."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    _migrate_schema(conn)
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
@@ -153,17 +190,17 @@ def _new_run_id() -> str:
 # ---------------------------------------------------------------------------
 
 def upsert_model_config(conn: sqlite3.Connection, model_cfg) -> int:
-    """Insert or update model_configs row. Keyed on (model_name, runtime). Returns row id."""
+    """Insert or update model_configs row. Keyed on (model_name, runtime, quantization). Returns row id."""
     model_name = getattr(model_cfg, "model_name", model_cfg.name)
     runtime = getattr(model_cfg, "runtime", "openai-compat")
+    quantization = getattr(model_cfg, "quantization", None) or ""
     conn.execute(
         """
         INSERT INTO model_configs
             (config_name, model_name, quantization, architecture, runtime, base_url, hardware, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(model_name, runtime) DO UPDATE SET
+        ON CONFLICT(model_name, runtime, quantization) DO UPDATE SET
             config_name  = excluded.config_name,
-            quantization = excluded.quantization,
             architecture = excluded.architecture,
             base_url     = excluded.base_url,
             hardware     = excluded.hardware
@@ -171,7 +208,7 @@ def upsert_model_config(conn: sqlite3.Connection, model_cfg) -> int:
         (
             model_cfg.name,
             model_name,
-            getattr(model_cfg, "quantization", None),
+            quantization,
             getattr(model_cfg, "architecture", None),
             runtime,
             getattr(model_cfg.client, "base_url", None) if hasattr(model_cfg, "client") else None,
@@ -181,7 +218,8 @@ def upsert_model_config(conn: sqlite3.Connection, model_cfg) -> int:
     )
     conn.commit()
     row = conn.execute(
-        "SELECT id FROM model_configs WHERE model_name = ? AND runtime = ?", (model_name, runtime)
+        "SELECT id FROM model_configs WHERE model_name = ? AND runtime = ? AND quantization = ?",
+        (model_name, runtime, quantization),
     ).fetchone()
     return row["id"]
 
@@ -297,17 +335,16 @@ def query_recall_leaderboard(
             mc.runtime,
             mc.architecture,
             rr.corpus,
-            rr.run_id,
-            COUNT(res.id)               AS n_functions,
-            AVG(res.pass_rate)          AS pass_rate,
-            AVG(res.matched_mean)       AS matched_mean,
+            COUNT(DISTINCT rr.run_id)    AS n_runs,
+            AVG(res.pass_rate)           AS pass_rate,
+            AVG(res.matched_mean)        AS matched_mean,
             AVG(res.generation_tps_mean) AS generation_tps_mean,
-            AVG(res.overall_tps_mean)   AS overall_tps_mean
+            AVG(res.overall_tps_mean)    AS overall_tps_mean
         FROM recall_runs rr
         JOIN model_configs mc ON mc.id = rr.model_config_id
         LEFT JOIN recall_results res ON res.run_id = rr.run_id
         WHERE {" AND ".join(where)}
-        GROUP BY rr.run_id
+        GROUP BY mc.id, rr.corpus
         ORDER BY pass_rate DESC
         """,
         params,
@@ -315,15 +352,30 @@ def query_recall_leaderboard(
     return [dict(r) for r in rows]
 
 
-def query_recall_depth(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+def query_recall_depth(
+    conn: sqlite3.Connection,
+    config_name: str,
+    quantization: str,
+    corpus: str,
+) -> list[dict]:
+    """Average per-function recall results across all runs for a given model+quant+corpus."""
     rows = conn.execute(
         """
-        SELECT function_name, start_line, primary_matched, latency_mean_s, pass_rate
-        FROM recall_results
-        WHERE run_id = ? AND start_line IS NOT NULL
-        ORDER BY start_line
+        SELECT
+            res.function_name,
+            res.start_line,
+            AVG(res.primary_matched) AS primary_matched,
+            AVG(res.latency_mean_s)  AS latency_mean_s,
+            AVG(res.pass_rate)       AS pass_rate
+        FROM recall_results res
+        JOIN recall_runs rr ON rr.run_id = res.run_id
+        JOIN model_configs mc ON mc.id = rr.model_config_id
+        WHERE mc.config_name = ? AND mc.quantization = ? AND rr.corpus = ?
+          AND res.start_line IS NOT NULL
+        GROUP BY res.function_name
+        ORDER BY res.start_line
         """,
-        (run_id,),
+        (config_name, quantization, corpus),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -397,14 +449,6 @@ def query_lmeval_leaderboard(
 
     rows = conn.execute(
         f"""
-        WITH latest_runs AS (
-            SELECT run_id, model_config_id, task_suite,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY model_config_id, task_suite
-                       ORDER BY created_at DESC
-                   ) AS rn
-            FROM lmeval_runs
-        )
         SELECT
             mc.model_name,
             mc.config_name,
@@ -414,14 +458,14 @@ def query_lmeval_leaderboard(
             lr.task_suite,
             res.task,
             res.metric,
-            res.value,
-            res.stderr,
-            res.n_samples
-        FROM latest_runs lr
+            AVG(res.value)      AS value,
+            AVG(res.stderr)     AS stderr,
+            SUM(res.n_samples)  AS n_samples
+        FROM lmeval_runs lr
         JOIN model_configs mc ON mc.id = lr.model_config_id
         JOIN lmeval_results res ON res.run_id = lr.run_id
-        WHERE lr.rn = 1
-          AND {" AND ".join(where)}
+        WHERE {" AND ".join(where)}
+        GROUP BY mc.id, lr.task_suite, res.task, res.metric
         ORDER BY mc.config_name, res.task
         """,
         params,
@@ -552,16 +596,17 @@ def query_speed_curves(
             mc.quantization,
             mc.runtime,
             sm.context_tokens,
-            sm.prefill_tps_mean,
-            sm.prefill_tps_stddev,
-            sm.generation_tps_mean,
-            sm.generation_tps_stddev,
-            sm.overall_tps_mean,
-            sm.ttft_mean_s
+            AVG(sm.prefill_tps_mean)      AS prefill_tps_mean,
+            AVG(sm.prefill_tps_stddev)    AS prefill_tps_stddev,
+            AVG(sm.generation_tps_mean)   AS generation_tps_mean,
+            AVG(sm.generation_tps_stddev) AS generation_tps_stddev,
+            AVG(sm.overall_tps_mean)      AS overall_tps_mean,
+            AVG(sm.ttft_mean_s)           AS ttft_mean_s
         FROM speed_runs sr
         JOIN model_configs mc ON mc.id = sr.model_config_id
         JOIN speed_measurements sm ON sm.run_id = sr.run_id
         WHERE {" AND ".join(where)}
+        GROUP BY mc.id, sm.context_tokens
         ORDER BY mc.config_name, sm.context_tokens
         """,
         params,
@@ -630,13 +675,18 @@ def query_filter_options(conn: sqlite3.Connection) -> dict:
             ).fetchall()
         ]
 
+    model_quants = [
+        {"model_name": r[0], "quantization": r[1]}
+        for r in conn.execute(
+            "SELECT DISTINCT model_name, quantization FROM model_configs ORDER BY model_name, quantization"
+        ).fetchall()
+    ]
     return {
         "corpora":       _distinct("recall_runs", "corpus"),
         "suites":        _distinct("lmeval_runs", "task_suite"),
         "tasks":         _distinct("lmeval_results", "task"),
         "runtimes":      _distinct("model_configs", "runtime"),
-        "quantizations": _distinct("model_configs", "quantization"),
         "architectures": _distinct("model_configs", "architecture"),
         "hardware":      _distinct("model_configs", "hardware"),
-        "model_configs": _distinct("model_configs", "model_name"),
+        "model_quants":  model_quants,
     }

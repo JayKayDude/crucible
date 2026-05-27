@@ -203,6 +203,15 @@ select {
   padding-bottom: 6px;
   margin-bottom: 2px;
 }
+.model-filter-panel .mf-parent {
+  font-weight: 600;
+  color: #c4b5fd;
+  margin-top: 4px;
+}
+.model-filter-panel .mf-child {
+  padding-left: 20px;
+  color: #d1d5db;
+}
 
 /* ── Loading spinner ── */
 .chart-spinner {
@@ -258,3 +267,70 @@ select {
 }
 .score-card-metric .metric-name { color: #6b7280; }
 .score-card-metric .metric-value { font-weight: 500; color: #e0e0e0; }
+
+/* ── Detail toggle ── */
+.detail-toggle {
+  display: flex;
+  gap: 4px;
+  margin: 8px 4px;
+}
+.detail-btn {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #9ca3af;
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.detail-btn.active {
+  background: #6366f1;
+  border-color: #6366f1;
+  color: #fff;
+}
+.detail-btn:hover:not(.active) {
+  border-color: #6366f1;
+  color: #e0e0e0;
+}
+
+/* ── Drilldown panel ── */
+.drilldown-panel {
+  border-top: 1px solid #2a2d3a;
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.drilldown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.drilldown-title {
+  font-size: 0.85rem;
+  color: #9ca3af;
+  font-weight: 500;
+}
+.drilldown-close {
+  background: none;
+  border: none;
+  color: #6b7280;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.drilldown-close:hover { color: #e0e0e0; }
+
+.bbh-add-model {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #e0e0e0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  margin-left: auto;
+  margin-right: 8px;
+}
+.bbh-add-model:hover { border-color: #6366f1; }

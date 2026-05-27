@@ -8,6 +8,17 @@ const MODEL_PALETTE = [
   "#06b6d4","#a855f7",
 ];
 
+// Colors reserved for pass/fail agreement markers in the recall comparison chart
+const _RECALL_AGREE_COLORS = new Set(["#10b981", "#ef4444"]);
+// Fallback palette that excludes those reserved colors
+const _RECALL_MODEL_PALETTE = MODEL_PALETTE.filter(c => !_RECALL_AGREE_COLORS.has(c));
+function _recallModelColor(label) {
+  const base = modelColor(label);
+  if (!_RECALL_AGREE_COLORS.has(base)) return base;
+  // Clash — pick the next available safe color
+  return _RECALL_MODEL_PALETTE[Math.abs([...label].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % _RECALL_MODEL_PALETTE.length];
+}
+
 const _modelColorCache = {};
 let _modelColorIndex = 0;
 function modelColor(name) {
@@ -29,19 +40,36 @@ const TASK_DISPLAY = {
   humaneval_plus:        "HumanEval+",
   mbpp_plus:             "MBPP+",
   bbh_cot_fewshot:       "BBH",
+  bbh_cot_zeroshot:      "BBH",
   gsm8k_cot_zeroshot:    "GSM8K",
   ifeval:                "IFEval",
+  multiple_py:           "Python (MultiPL)",
+  multiple_js:           "JavaScript (MultiPL)",
+  multiple_ts:           "TypeScript (MultiPL)",
+  multiple_java:         "Java (MultiPL)",
+  multiple_cpp:          "C++ (MultiPL)",
+  multiple_rs:           "Rust (MultiPL)",
+  multiple_go:           "Go (MultiPL)",
 };
-function taskLabel(t) { return TASK_DISPLAY[t] || t; }
+function taskLabel(t) {
+  if (TASK_DISPLAY[t]) return TASK_DISPLAY[t];
+  const bbh = t.match(/^bbh_cot_zeroshot_(.+)$/);
+  if (bbh) return "BBH: " + bbh[1].replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  return t;
+}
 
 let _currentTab      = "overview";
 let _sseSource       = null;
 let _bannerInterval  = null;
 let _lastSyncTime    = null;
-let _modelFilter     = null; // null = all; Set<string> = allow-list by model_name
-let _knownModels     = [];
+let _modelFilter     = null; // null = all; Set<"model_name|quantization"> = allow-list
+let _knownModelQuants = []; // [{model_name, quantization}]
 let _pollFallbackInterval = null;
 let _lastPolledTs    = null;
+let _reasoningData   = [];
+let _bbhModels            = []; // models currently shown in BBH drilldown
+let _recallModels         = []; // keys currently shown in recall drilldown (max 2)
+let _recallLeaderboardData = [];
 
 // ─────────────────────────────────────────────
 // Plotly base layout
@@ -61,7 +89,6 @@ const PLOTLY_LAYOUT_BASE = {
 function getFilters() {
   return {
     runtime:      document.getElementById("filter-runtime").value || null,
-    quantization: document.getElementById("filter-quant").value || null,
     architecture: document.getElementById("filter-arch").value || null,
   };
 }
@@ -111,7 +138,10 @@ function sortedByValue(rows, key) {
 
 function applyModelFilter(rows) {
   if (!_modelFilter) return rows;
-  return rows.filter(r => _modelFilter.has(r.model_name || r.config_name));
+  return rows.filter(r => {
+    const key = (r.model_name || r.config_name || "") + "|" + (r.quantization || "");
+    return _modelFilter.has(key);
+  });
 }
 
 function updateLastSynced() {
@@ -265,44 +295,86 @@ function startPollingFallback() {
 // Model filter panel
 // ─────────────────────────────────────────────
 
-function buildModelFilterPanel(models) {
-  _knownModels = models;
+function buildModelFilterPanel(modelQuants) {
+  _knownModelQuants = modelQuants;
   const panel = document.getElementById("model-filter-panel");
   if (!panel) return;
   panel.innerHTML = "";
 
   const allLabel = document.createElement("label");
   const allCb = document.createElement("input");
-  allCb.type = "checkbox";
-  allCb.id = "mf-all";
-  allCb.checked = true;
+  allCb.type = "checkbox"; allCb.id = "mf-all"; allCb.checked = true;
   allLabel.appendChild(allCb);
   allLabel.appendChild(document.createTextNode(" All models"));
   panel.appendChild(allLabel);
 
-  models.forEach(name => {
-    const label = document.createElement("label");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.value = name;
-    cb.dataset.model = name;
-    cb.checked = true;
-    cb.addEventListener("change", updateModelFilter);
-    label.appendChild(cb);
-    label.appendChild(document.createTextNode(" " + name));
-    panel.appendChild(label);
+  // Group by model_name
+  const groups = {};
+  modelQuants.forEach(({ model_name, quantization }) => {
+    if (!groups[model_name]) groups[model_name] = [];
+    groups[model_name].push(quantization);
   });
 
-  allCb.addEventListener("change", (e) => {
-    panel.querySelectorAll("input[data-model]").forEach(cb => { cb.checked = e.target.checked; });
+  Object.entries(groups).forEach(([modelName, quants]) => {
+    if (quants.length === 1) {
+      const key = modelName + "|" + quants[0];
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = true; cb.dataset.key = key;
+      cb.addEventListener("change", updateModelFilter);
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(" " + modelName + (quants[0] ? ` (${quants[0]})` : "")));
+      panel.appendChild(label);
+    } else {
+      const parentLabel = document.createElement("label");
+      parentLabel.className = "mf-parent";
+      const parentCb = document.createElement("input");
+      parentCb.type = "checkbox"; parentCb.checked = true; parentCb.dataset.parent = modelName;
+      parentLabel.appendChild(parentCb);
+      parentLabel.appendChild(document.createTextNode(" " + modelName));
+      panel.appendChild(parentLabel);
+
+      quants.forEach(quant => {
+        const key = modelName + "|" + quant;
+        const childLabel = document.createElement("label");
+        childLabel.className = "mf-child";
+        const childCb = document.createElement("input");
+        childCb.type = "checkbox"; childCb.checked = true;
+        childCb.dataset.key = key; childCb.dataset.parentModel = modelName;
+        childCb.addEventListener("change", () => { _syncParent(modelName); updateModelFilter(); });
+        childLabel.appendChild(childCb);
+        childLabel.appendChild(document.createTextNode(" " + (quant || "unknown")));
+        panel.appendChild(childLabel);
+      });
+
+      parentCb.addEventListener("change", e => {
+        panel.querySelectorAll(`input[data-parent-model="${modelName}"]`).forEach(cb => { cb.checked = e.target.checked; });
+        updateModelFilter();
+      });
+    }
+  });
+
+  allCb.addEventListener("change", e => {
+    panel.querySelectorAll("input[data-key]").forEach(cb => { cb.checked = e.target.checked; });
+    panel.querySelectorAll("input[data-parent]").forEach(cb => { cb.checked = e.target.checked; cb.indeterminate = false; });
     updateModelFilter();
   });
 }
 
+function _syncParent(modelName) {
+  const panel = document.getElementById("model-filter-panel");
+  const children = [...panel.querySelectorAll(`input[data-parent-model="${modelName}"]`)];
+  const parentCb = panel.querySelector(`input[data-parent="${modelName}"]`);
+  if (!parentCb) return;
+  const n = children.filter(c => c.checked).length;
+  parentCb.checked = n > 0;
+  parentCb.indeterminate = n > 0 && n < children.length;
+}
+
 function updateModelFilter() {
-  const checked = [...document.querySelectorAll("#model-filter-panel input[data-model]:checked")]
-    .map(cb => cb.value);
-  _modelFilter = checked.length === _knownModels.length ? null : new Set(checked);
+  const all = [...document.querySelectorAll("#model-filter-panel input[data-key]")];
+  const checked = all.filter(cb => cb.checked).map(cb => cb.dataset.key);
+  _modelFilter = checked.length === all.length ? null : new Set(checked);
   renderCurrentTab();
 }
 
@@ -377,12 +449,12 @@ async function renderOverview() {
 async function renderCoding() {
   showSpinner("chart-coding-leaderboard");
   const f = getFilters();
-  let data = await fetchAPI("/lmeval/leaderboard", { ...f, suite: "coding-standard" }).catch(() => []);
+  const data = await fetchAPI("/lmeval/leaderboard", { ...f, suite: "coding-standard" }).catch(() => []);
   hideSpinner("chart-coding-leaderboard");
-  data = applyModelFilter(data);
-  if (!data.length) return emptyChart("chart-coding-leaderboard");
+  const filtered = applyModelFilter(data);
+  if (!filtered.length) return emptyChart("chart-coding-leaderboard");
 
-  const pass1 = data.filter(d => d.metric && (d.metric.includes("pass@1") || d.metric.includes("pass_at_1")));
+  const pass1 = filtered.filter(d => d.metric && (d.metric.includes("pass@1") || d.metric.includes("pass_at_1")));
   const tasks  = [...new Set(pass1.map(d => d.task))];
   const heTask = tasks.find(t => t.includes("humaneval")) || tasks[0];
   const allModels = [...new Set(pass1.map(d => modelLabel(d)))];
@@ -390,7 +462,7 @@ async function renderCoding() {
   const modelsSorted = allModels.sort((a, b) => {
     const aVal = pass1.find(d => modelLabel(d) === a && d.task === heTask)?.value ?? 0;
     const bVal = pass1.find(d => modelLabel(d) === b && d.task === heTask)?.value ?? 0;
-    return aVal - bVal; // ascending = best at top in Plotly h-bar
+    return aVal - bVal;
   });
 
   const traces = tasks.map(task => ({
@@ -411,7 +483,6 @@ async function renderCoding() {
 
   const chartEl = document.getElementById("chart-coding-leaderboard");
   chartEl.style.height = Math.max(350, modelsSorted.length * 48 + 100) + "px";
-
   Plotly.newPlot("chart-coding-leaderboard", traces, {
     ...PLOTLY_LAYOUT_BASE,
     barmode: "group",
@@ -426,22 +497,28 @@ async function renderCoding() {
 // Tab 3: Reasoning
 // ─────────────────────────────────────────────
 
+function _primaryMetric(task, metric) {
+  if (task === "ifeval") return metric === "prompt_level_strict_acc,none";
+  return metric && metric.includes("flexible");
+}
+const _BBH_SUBTASK = /^bbh_cot_zeroshot_.+/;
+
 async function renderReasoning() {
   showSpinner("chart-reasoning-leaderboard");
+  document.getElementById("reasoning-drilldown")?.classList.add("hidden");
+  _bbhModels = [];
   const f = getFilters();
   let data = await fetchAPI("/lmeval/leaderboard", { ...f, suite: "reasoning" }).catch(() => []);
   hideSpinner("chart-reasoning-leaderboard");
   data = applyModelFilter(data);
+  _reasoningData = data;
   if (!data.length) return emptyChart("chart-reasoning-leaderboard");
 
-  function primaryMetric(task, metric) {
-    if (task === "ifeval") return metric === "prompt_level_strict_acc,none";
-    return metric && metric.includes("flexible");
-  }
-  // Drop BBH subtasks — keep only the top-level aggregate (bbh_cot_zeroshot)
-  const BBH_SUBTASK = /^bbh_cot_zeroshot_.+/;
-  const filtered = data.filter(d => primaryMetric(d.task, d.metric) && !BBH_SUBTASK.test(d.task));
-  const tasks    = [...new Set(filtered.map(d => d.task))];
+  // Summary: top-level benchmarks only (no individual BBH subtasks)
+  const filtered = data.filter(d =>
+    _primaryMetric(d.task, d.metric) && !_BBH_SUBTASK.test(d.task)
+  );
+  const tasks     = [...new Set(filtered.map(d => d.task))];
   const allModels = [...new Set(filtered.map(d => modelLabel(d)))];
 
   const modelsSorted = allModels.sort((a, b) => {
@@ -452,28 +529,114 @@ async function renderReasoning() {
     return avg(a) - avg(b);
   });
 
-  const traces = tasks.map(task => ({
-    type: "bar", orientation: "h",
-    x: modelsSorted.map(m => filtered.find(d => modelLabel(d) === m && d.task === task)?.value ?? 0),
-    y: modelsSorted,
-    name: taskLabel(task),
-    text: modelsSorted.map(m => {
-      const v = filtered.find(d => modelLabel(d) === m && d.task === task)?.value;
-      return v != null ? `${(v * 100).toFixed(1)}%` : "";
-    }),
-    textposition: "outside",
-  }));
+  const traces = tasks.map(task => {
+    const isBBH = task.startsWith("bbh");
+    return {
+      type: "bar", orientation: "h",
+      x: modelsSorted.map(m => filtered.find(d => modelLabel(d) === m && d.task === task)?.value ?? 0),
+      y: modelsSorted,
+      name: isBBH ? taskLabel(task) + "  ▶" : taskLabel(task),
+      customdata: modelsSorted.map(m => task + "|" + m),
+      text: modelsSorted.map(m => {
+        const v = filtered.find(d => modelLabel(d) === m && d.task === task)?.value;
+        const pct = v != null ? `${(v * 100).toFixed(1)}%` : "";
+        return isBBH && pct ? pct + "  ▶" : pct;
+      }),
+      textposition: "outside",
+      textfont: isBBH ? { size: 13 } : {},
+    };
+  });
 
   const chartEl = document.getElementById("chart-reasoning-leaderboard");
   chartEl.style.height = Math.max(350, modelsSorted.length * 48 + 100) + "px";
-
   Plotly.newPlot("chart-reasoning-leaderboard", traces, {
     ...PLOTLY_LAYOUT_BASE,
     barmode: "group",
-    title: { text: "Reasoning Benchmarks", font: { color: "#fff" } },
+    title: { text: "Reasoning Benchmarks  ·  click BBH to expand", font: { color: "#fff" } },
     xaxis: { title: "Score", range: [0, 1.18], color: "#9ca3af", tickformat: ".0%" },
     yaxis: { color: "#9ca3af", automargin: true },
     margin: { ...PLOTLY_LAYOUT_BASE.margin, r: 70 },
+  }, { responsive: true });
+
+  chartEl.style.cursor = "pointer";
+  chartEl.on("plotly_click", d => {
+    const raw = d.points[0]?.customdata;
+    if (!raw || !raw.startsWith("bbh")) return;
+    const clickedModel = raw.split("|").slice(1).join("|");
+    const panel = document.getElementById("reasoning-drilldown");
+    const isOpen = panel && !panel.classList.contains("hidden");
+    if (isOpen && _bbhModels[0] === clickedModel) {
+      panel.classList.add("hidden");
+      Plotly.purge(document.getElementById("chart-reasoning-drilldown"));
+      _bbhModels = [];
+    } else {
+      openReasoningDrilldown(clickedModel);
+    }
+  });
+}
+
+function openReasoningDrilldown(clickedModel) {
+  const panel = document.getElementById("reasoning-drilldown");
+  if (!panel) return;
+  _bbhModels = [clickedModel];
+  panel.classList.remove("hidden");
+  renderBBHDrilldown();
+}
+
+function renderBBHDrilldown() {
+  const subtaskData = _reasoningData.filter(d =>
+    _BBH_SUBTASK.test(d.task) && _primaryMetric(d.task, d.metric)
+  );
+  if (!subtaskData.length) return;
+
+  showSpinner("chart-reasoning-drilldown");
+
+  // Update title
+  const titleEl = document.getElementById("reasoning-drilldown-title");
+  if (titleEl) titleEl.textContent = "BBH — " + _bbhModels.join(", ");
+
+  // Populate add-model dropdown with models not yet shown
+  const allAvailable = [...new Set(subtaskData.map(d => modelLabel(d)))];
+  const addSel = document.getElementById("bbh-add-model");
+  if (addSel) {
+    addSel.innerHTML = '<option value="">＋ Add model...</option>';
+    allAvailable.filter(m => !_bbhModels.includes(m)).forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = m;
+      addSel.appendChild(opt);
+    });
+    addSel.style.display = allAvailable.length > _bbhModels.length ? "" : "none";
+  }
+
+  const tasksSorted = [...new Set(subtaskData.map(d => d.task))].sort((a, b) => {
+    const val = (t, m) => subtaskData.find(d => d.task === t && modelLabel(d) === m)?.value ?? 0;
+    return val(a, _bbhModels[0]) - val(b, _bbhModels[0]);
+  });
+
+  const traces = _bbhModels.map(m => ({
+    type: "bar", orientation: "h",
+    x: tasksSorted.map(t => subtaskData.find(d => modelLabel(d) === m && d.task === t)?.value ?? 0),
+    y: tasksSorted.map(t => taskLabel(t)),
+    name: m,
+    text: tasksSorted.map(t => {
+      const v = subtaskData.find(d => modelLabel(d) === m && d.task === t)?.value;
+      return v != null ? `${(v * 100).toFixed(1)}%` : "";
+    }),
+    textposition: "outside",
+    marker: { color: modelColor(m) },
+  }));
+
+  const drillEl = document.getElementById("chart-reasoning-drilldown");
+  drillEl.style.height = Math.max(400, tasksSorted.length * 28 + 120) + "px";
+  hideSpinner("chart-reasoning-drilldown");
+
+  Plotly.newPlot("chart-reasoning-drilldown", traces, {
+    ...PLOTLY_LAYOUT_BASE,
+    barmode: "group",
+    title: { text: "BBH — Subtask Breakdown", font: { color: "#fff" } },
+    xaxis: { title: "Score", range: [0, 1.18], color: "#9ca3af", tickformat: ".0%" },
+    yaxis: { color: "#9ca3af", automargin: true, tickfont: { size: 10 } },
+    margin: { ...PLOTLY_LAYOUT_BASE.margin, l: 220, r: 70 },
   }, { responsive: true });
 }
 
@@ -483,66 +646,186 @@ async function renderReasoning() {
 
 async function renderRecallLeaderboard() {
   showSpinner("chart-recall-leaderboard");
+  document.getElementById("recall-drilldown")?.classList.add("hidden");
+  _recallModels = [];
   const f = getFilters();
   let data = await fetchAPI("/recall/leaderboard", f).catch(() => []);
   hideSpinner("chart-recall-leaderboard");
 
   if (f.architecture) data = data.filter(r => r.architecture === f.architecture);
   data = applyModelFilter(data);
+  _recallLeaderboardData = data;
   if (!data.length) return emptyChart("chart-recall-leaderboard");
 
   const sorted = sortedByValue(data, "pass_rate");
-
-  const sel = document.getElementById("filter-depth-run");
-  sel.innerHTML = '<option value="">select a run</option>';
-  data.forEach(r => {
-    const opt = document.createElement("option");
-    opt.value = r.run_id;
-    opt.textContent = `${modelLabel(r)} — ${r.corpus}`;
-    sel.appendChild(opt);
-  });
 
   Plotly.newPlot("chart-recall-leaderboard", [{
     type: "bar", orientation: "h",
     x: sorted.map(d => d.pass_rate ?? 0),
     y: sorted.map(d => `${modelLabel(d)} | ${d.corpus}`),
-    text: sorted.map(d => `${((d.pass_rate ?? 0) * 100).toFixed(0)}%`),
+    text: sorted.map(d => `${((d.pass_rate ?? 0) * 100).toFixed(0)}%  ▶`),
     textposition: "outside",
+    textfont: { size: 13 },
     marker: { color: sorted.map(d => modelColor(modelLabel(d))) },
+    customdata: sorted.map(d => JSON.stringify({ config_name: d.config_name, quantization: d.quantization, corpus: d.corpus })),
   }], {
     ...PLOTLY_LAYOUT_BASE,
-    title: { text: "Long Context Recall — Codeneedle", font: { color: "#fff" } },
+    title: { text: "Long Context Recall — Codeneedle  ·  click a bar to expand", font: { color: "#fff" } },
     xaxis: { title: "Pass rate", range: [0, 1.2], color: "#9ca3af", tickformat: ".0%" },
     yaxis: { color: "#9ca3af", automargin: true },
     margin: { ...PLOTLY_LAYOUT_BASE.margin, r: 70 },
   }, { responsive: true });
+
+  const recallChartEl = document.getElementById("chart-recall-leaderboard");
+  recallChartEl.style.cursor = "pointer";
+  recallChartEl.on("plotly_click", d => {
+    const key = d.points[0]?.customdata;
+    if (!key) return;
+    const panel = document.getElementById("recall-drilldown");
+    const isOpen = panel && !panel.classList.contains("hidden");
+    if (isOpen && _recallModels[0] === key) {
+      panel.classList.add("hidden");
+      Plotly.purge(document.getElementById("chart-recall-depth"));
+      _recallModels = [];
+    } else {
+      openRecallDrilldown(key);
+    }
+  });
 }
 
-async function renderRecallDepth(runId) {
-  if (!runId) return;
+function _recallKeyLabel(key) {
+  const { config_name, quantization, corpus } = JSON.parse(key);
+  const row = _recallLeaderboardData.find(r =>
+    r.config_name === config_name && r.quantization === quantization && r.corpus === corpus
+  );
+  return row ? modelLabel(row) : (quantization ? `${config_name} (${quantization})` : config_name);
+}
+
+function openRecallDrilldown(key) {
+  const panel = document.getElementById("recall-drilldown");
+  if (!panel) return;
+  _recallModels = [key];
+  panel.classList.remove("hidden");
+  renderRecallDepth();
+}
+
+async function renderRecallDepth() {
+  if (!_recallModels.length) return;
   showSpinner("chart-recall-depth");
-  const data = await fetchAPI("/recall/depth", { run_id: runId }).catch(() => []);
+
+  const datasets = await Promise.all(_recallModels.map(k => {
+    const { config_name, quantization, corpus } = JSON.parse(k);
+    return fetchAPI("/recall/depth", { config_name, quantization, corpus }).catch(() => []);
+  }));
+
   hideSpinner("chart-recall-depth");
-  if (!data.length) return emptyChart("chart-recall-depth", "No depth data for this run");
+  if (!datasets[0].length) return emptyChart("chart-recall-depth", "No depth data");
 
-  const maxLine = Math.max(...data.map(d => d.start_line || 0)) || 1;
+  // Update title
+  const titleEl = document.getElementById("recall-drilldown-title");
+  if (titleEl) titleEl.textContent = "Recall Depth — " + _recallModels.map(_recallKeyLabel).join(" vs ");
 
-  Plotly.newPlot("chart-recall-depth", [{
-    type: "scatter", mode: "markers",
-    x: data.map(d => (d.start_line || 0) / maxLine),
-    y: data.map(d => (d.primary_matched || 0) / 20),
-    text: data.map(d => d.function_name),
-    hovertemplate: "<b>%{text}</b><br>depth: %{x:.0%}<br>matched: %{y:.0%}<extra></extra>",
+  // Populate add-model dropdown
+  const addSel = document.getElementById("recall-add-model");
+  if (addSel) {
+    addSel.innerHTML = '<option value="">＋ Add model...</option>';
+    if (_recallModels.length < 2) {
+      _recallLeaderboardData
+        .filter(r => {
+          const k = JSON.stringify({ config_name: r.config_name, quantization: r.quantization, corpus: r.corpus });
+          return !_recallModels.includes(k);
+        })
+        .forEach(r => {
+          const k = JSON.stringify({ config_name: r.config_name, quantization: r.quantization, corpus: r.corpus });
+          const opt = document.createElement("option");
+          opt.value = k;
+          opt.textContent = `${modelLabel(r)} | ${r.corpus}`;
+          addSel.appendChild(opt);
+        });
+    }
+    addSel.style.display = _recallModels.length < 2 && addSel.options.length > 1 ? "" : "none";
+  }
+
+  // Build sorted function list by start_line (shallow → deep in file)
+  const allFuncs = [...new Set(datasets.flat().map(d => d.function_name))];
+  const lineOf = {};
+  datasets.flat().forEach(d => { lineOf[d.function_name] = d.start_line || 0; });
+  allFuncs.sort((a, b) => lineOf[a] - lineOf[b]);
+
+  const chartHeight = Math.max(300, allFuncs.length * 36 * (_recallModels.length === 1 ? 1 : 2) + 100);
+  document.getElementById("chart-recall-depth").style.height = chartHeight + "px";
+
+  if (_recallModels.length === 1) {
+    const mapD = Object.fromEntries(datasets[0].map(d => [d.function_name, d]));
+    const color1 = _recallModelColor(_recallKeyLabel(_recallModels[0]));
+    Plotly.newPlot("chart-recall-depth", [{
+      type: "bar", orientation: "h",
+      y: allFuncs,
+      x: allFuncs.map(fn => (mapD[fn]?.primary_matched ?? 0) / 20),
+      marker: {
+        color: allFuncs.map(fn => (mapD[fn]?.pass_rate ?? 0) > 0 ? "#10b981" : hexToRgba(color1, 0.45)),
+        line: { color: allFuncs.map(fn => (mapD[fn]?.pass_rate ?? 0) > 0 ? "#10b981" : color1), width: 1.5 },
+      },
+      text: allFuncs.map(fn => mapD[fn] ? `${mapD[fn].primary_matched}/20` : ""),
+      textposition: "outside",
+      textfont: { color: "#9ca3af", size: 11 },
+      customdata: allFuncs.map(fn => lineOf[fn]),
+      hovertemplate: "<b>%{y}</b><br>Matched: %{x:.0%} (%{text})<br>At line %{customdata}<extra></extra>",
+      showlegend: false,
+    }], {
+      ...PLOTLY_LAYOUT_BASE,
+      title: { text: "Lines Recalled per Function (sorted shallow → deep)", font: { color: "#e0e0e0", size: 13 } },
+      height: chartHeight,
+      margin: { l: 180, r: 60, t: 50, b: 50 },
+      xaxis: { title: "Fraction matched (0–1)", range: [0, 1.15], color: "#9ca3af", tickformat: ".0%" },
+      yaxis: { color: "#9ca3af", automargin: true, tickfont: { size: 11 } },
+      bargap: 0.3,
+    }, { responsive: true });
+    return;
+  }
+
+  // Two-model comparison — grouped horizontal bars
+  const [dataA, dataB] = datasets;
+  const labelA = _recallKeyLabel(_recallModels[0]);
+  const labelB = _recallKeyLabel(_recallModels[1]);
+  const colorA = _recallModelColor(labelA);
+  let colorB = _recallModelColor(labelB);
+  if (colorB === colorA) {
+    colorB = _RECALL_MODEL_PALETTE.find(c => c !== colorA) ?? colorB;
+  }
+  const mapA = Object.fromEntries(dataA.map(d => [d.function_name, d]));
+  const mapB = Object.fromEntries(dataB.map(d => [d.function_name, d]));
+
+  const mkBarTrace = (funcs, modelMap, color, label) => ({
+    type: "bar", orientation: "h",
+    y: funcs,
+    x: funcs.map(fn => (modelMap[fn]?.primary_matched ?? 0) / 20),
+    name: label,
     marker: {
-      color: data.map(d => (d.pass_rate ?? 0) > 0 ? "#10b981" : "#ef4444"),
-      size: 9,
-      opacity: 0.85,
+      color: funcs.map(fn => (modelMap[fn]?.pass_rate ?? 0) > 0 ? color : hexToRgba(color, 0.35)),
+      line: { color, width: 1 },
     },
-  }], {
+    text: funcs.map(fn => modelMap[fn] ? `${modelMap[fn].primary_matched}/20` : "–"),
+    textposition: "outside",
+    textfont: { color: "#9ca3af", size: 10 },
+    customdata: funcs.map(fn => lineOf[fn]),
+    hovertemplate: "<b>%{y}</b><br>%{x:.0%} matched (%{text})<br>At line %{customdata}<extra>" + label + "</extra>",
+  });
+
+  Plotly.newPlot("chart-recall-depth", [
+    mkBarTrace(allFuncs, mapA, colorA, labelA),
+    mkBarTrace(allFuncs, mapB, colorB, labelB),
+  ], {
     ...PLOTLY_LAYOUT_BASE,
-    title: { text: "Recall Accuracy vs Context Depth", font: { color: "#fff" } },
-    xaxis: { title: "Depth in file (0 = start, 1 = end)", range: [0, 1], color: "#9ca3af", tickformat: ".0%" },
-    yaxis: { title: "Lines matched / 20", range: [0, 1.05], color: "#9ca3af" },
+    title: { text: "Lines Recalled per Function (sorted shallow → deep)", font: { color: "#e0e0e0", size: 13 } },
+    barmode: "group",
+    height: chartHeight,
+    margin: { l: 180, r: 60, t: 50, b: 50 },
+    xaxis: { title: "Fraction matched (0–1)", range: [0, 1.25], color: "#9ca3af", tickformat: ".0%" },
+    yaxis: { color: "#9ca3af", automargin: true, tickfont: { size: 11 } },
+    legend: { font: { color: "#e0e0e0", size: 11 }, bgcolor: "rgba(0,0,0,0)", x: 0.5, xanchor: "center", y: 1.04, orientation: "h" },
+    bargap: 0.25,
+    bargroupgap: 0.08,
   }, { responsive: true });
 }
 
@@ -640,37 +923,6 @@ async function renderSpeed() {
 // Tab 7: Quant Impact
 // ─────────────────────────────────────────────
 
-async function renderQuantImpact() {
-  const modelConfig = document.getElementById("filter-quant-model").value;
-  if (!modelConfig) return emptyChart("chart-quant-impact", "Select a model above");
-
-  showSpinner("chart-quant-impact");
-  const data = await fetchAPI("/quant-impact", { model_config: modelConfig }).catch(() => []);
-  hideSpinner("chart-quant-impact");
-  if (!data.length) return emptyChart("chart-quant-impact", "No quant comparison data yet");
-
-  const quants  = [...new Set(data.map(d => d.quantization))].sort();
-  const metrics = [...new Set(data.map(d => d.metric))];
-
-  const traces = metrics.map(metric => ({
-    type: "bar",
-    x: quants,
-    y: quants.map(q => {
-      const r = data.find(d => d.quantization === q && d.metric === metric);
-      return r ? r.value : 0;
-    }),
-    name: metric,
-  }));
-
-  Plotly.newPlot("chart-quant-impact", traces, {
-    ...PLOTLY_LAYOUT_BASE,
-    barmode: "group",
-    title: { text: `Quantization Impact — ${modelConfig}`, font: { color: "#fff" } },
-    xaxis: { title: "Quantization", color: "#9ca3af" },
-    yaxis: { title: "Score", color: "#9ca3af" },
-  }, { responsive: true });
-}
-
 // ─────────────────────────────────────────────
 // Initialization
 // ─────────────────────────────────────────────
@@ -691,20 +943,9 @@ async function populateDropdowns() {
   };
 
   fill("filter-runtime", opts.runtimes);
-  fill("filter-quant",   opts.quantizations);
   fill("filter-arch",    opts.architectures);
 
-  const qm = document.getElementById("filter-quant-model");
-  const firstOpt = qm.querySelector("option");
-  qm.innerHTML = "";
-  qm.appendChild(firstOpt);
-  (opts.model_configs || []).forEach(m => {
-    const opt = document.createElement("option");
-    opt.value = opt.textContent = m;
-    qm.appendChild(opt);
-  });
-
-  buildModelFilterPanel(opts.model_configs || []);
+  buildModelFilterPanel(opts.model_quants || []);
 }
 
 function renderCurrentTab() {
@@ -714,7 +955,6 @@ function renderCurrentTab() {
     reasoning: renderReasoning,
     recall:    renderRecallLeaderboard,
     speed:     renderSpeed,
-    quant:     renderQuantImpact,
   };
   const fn = renderers[_currentTab];
   if (fn) fn().catch(err => console.error("Chart error:", err));
@@ -734,17 +974,35 @@ async function init() {
   });
 
   // Global filter dropdowns
-  ["filter-runtime", "filter-quant", "filter-arch"].forEach(id => {
+  ["filter-runtime", "filter-arch"].forEach(id => {
     document.getElementById(id).addEventListener("change", renderCurrentTab);
   });
 
-  // Recall depth run selector
-  document.getElementById("filter-depth-run").addEventListener("change", e => {
-    renderRecallDepth(e.target.value);
+  // Drilldown close buttons
+  document.getElementById("reasoning-drilldown-close").addEventListener("click", () => {
+    document.getElementById("reasoning-drilldown").classList.add("hidden");
+    Plotly.purge(document.getElementById("chart-reasoning-drilldown"));
+    _bbhModels = [];
   });
 
-  // Quant model selector
-  document.getElementById("filter-quant-model").addEventListener("change", renderQuantImpact);
+  document.getElementById("bbh-add-model").addEventListener("change", e => {
+    const m = e.target.value;
+    if (!m || _bbhModels.includes(m)) return;
+    _bbhModels.push(m);
+    renderBBHDrilldown();
+  });
+  document.getElementById("recall-drilldown-close").addEventListener("click", () => {
+    document.getElementById("recall-drilldown").classList.add("hidden");
+    Plotly.purge(document.getElementById("chart-recall-depth"));
+    _recallModels = [];
+  });
+
+  document.getElementById("recall-add-model").addEventListener("change", e => {
+    const k = e.target.value;
+    if (!k || _recallModels.includes(k) || _recallModels.length >= 2) return;
+    _recallModels.push(k);
+    renderRecallDepth();
+  });
 
   // Auto-refresh banner buttons
   document.getElementById("banner-refresh").addEventListener("click", () => {

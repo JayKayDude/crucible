@@ -41,7 +41,7 @@ def _db(request: Request):
 # ---------------------------------------------------------------------------
 
 @router.get("/filter-options")
-def get_filter_options(request: Request) -> dict[str, list[str]]:
+def get_filter_options(request: Request) -> dict[str, list]:
     conn = _db(request)
     try:
         return query_filter_options(conn)
@@ -97,11 +97,13 @@ def get_recall_leaderboard(
 @router.get("/recall/depth")
 def get_recall_depth(
     request: Request,
-    run_id: str,
+    config_name: str,
+    quantization: str,
+    corpus: str,
 ) -> list[dict[str, Any]]:
     conn = _db(request)
     try:
-        return query_recall_depth(conn, run_id)
+        return query_recall_depth(conn, config_name, quantization, corpus)
     finally:
         conn.close()
 
@@ -261,15 +263,16 @@ def get_runs(
             return [dict(r) for r in rows]
         # type is None — return all types merged, sorted by created_at
         rows = conn.execute(
-            """SELECT run_id, 'recall' AS type, mc.config_name, mc.quantization, created_at
-               FROM recall_runs rr JOIN model_configs mc ON mc.id=rr.model_config_id
-               UNION ALL
-               SELECT run_id, 'lmeval', mc.config_name, mc.quantization, created_at
-               FROM lmeval_runs lr JOIN model_configs mc ON mc.id=lr.model_config_id
-               UNION ALL
-               SELECT run_id, 'speed', mc.config_name, mc.quantization, created_at
-               FROM speed_runs sr JOIN model_configs mc ON mc.id=sr.model_config_id
-               ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            """SELECT * FROM (
+                   SELECT run_id, 'recall' AS type, mc.config_name, mc.quantization, rr.created_at
+                   FROM recall_runs rr JOIN model_configs mc ON mc.id=rr.model_config_id
+                   UNION ALL
+                   SELECT run_id, 'lmeval', mc.config_name, mc.quantization, lr.created_at
+                   FROM lmeval_runs lr JOIN model_configs mc ON mc.id=lr.model_config_id
+                   UNION ALL
+                   SELECT run_id, 'speed', mc.config_name, mc.quantization, sr.created_at
+                   FROM speed_runs sr JOIN model_configs mc ON mc.id=sr.model_config_id
+               ) ORDER BY created_at DESC LIMIT ? OFFSET ?""",
             (page_size, offset),
         ).fetchall()
         return [dict(r) for r in rows]

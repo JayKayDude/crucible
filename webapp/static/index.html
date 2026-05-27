@@ -25,7 +25,6 @@
 <div id="filters">
   <span class="filter-label">Filters:</span>
   <select id="filter-runtime"><option value="">All runtimes</option></select>
-  <select id="filter-quant"><option value="">All quantizations</option></select>
   <select id="filter-arch"><option value="">All architectures</option></select>
   <button id="model-filter-toggle" class="filter-btn">Filter Models ▾</button>
   <div id="model-filter-panel" class="model-filter-panel hidden"></div>
@@ -37,7 +36,6 @@
   <button class="tab" data-tab="reasoning">Reasoning</button>
   <button class="tab" data-tab="recall">Long Context</button>
   <button class="tab" data-tab="speed">Speed</button>
-  <button class="tab" data-tab="quant">Quant Impact</button>
 </nav>
 
 <div id="content">
@@ -61,6 +59,15 @@
     <div class="chart-container">
       <div class="chart-spinner hidden" id="spinner-reasoning-leaderboard"></div>
       <div id="chart-reasoning-leaderboard" style="height:400px"></div>
+      <div id="reasoning-drilldown" class="drilldown-panel hidden">
+        <div class="drilldown-header">
+          <span class="drilldown-title" id="reasoning-drilldown-title">BBH — Subtask Breakdown</span>
+          <select id="bbh-add-model" class="bbh-add-model"><option value="">＋ Add model...</option></select>
+          <button class="drilldown-close" id="reasoning-drilldown-close">✕</button>
+        </div>
+        <div class="chart-spinner hidden" id="spinner-reasoning-drilldown"></div>
+        <div id="chart-reasoning-drilldown" style="height:500px"></div>
+      </div>
     </div>
   </div>
 
@@ -68,14 +75,15 @@
     <div class="chart-container">
       <div class="chart-spinner hidden" id="spinner-recall-leaderboard"></div>
       <div id="chart-recall-leaderboard" style="height:400px"></div>
-    </div>
-    <div class="chart-container">
-      <div class="depth-controls">
-        <span>Depth chart for run:</span>
-        <select id="filter-depth-run"><option value="">select a run</option></select>
+      <div id="recall-drilldown" class="drilldown-panel hidden">
+        <div class="drilldown-header">
+          <span class="drilldown-title" id="recall-drilldown-title">Recall Depth</span>
+          <select id="recall-add-model" class="bbh-add-model"><option value="">＋ Add model...</option></select>
+          <button class="drilldown-close" id="recall-drilldown-close">✕</button>
+        </div>
+        <div class="chart-spinner hidden" id="spinner-recall-depth"></div>
+        <div id="chart-recall-depth" style="min-height:300px"></div>
       </div>
-      <div class="chart-spinner hidden" id="spinner-recall-depth"></div>
-      <div id="chart-recall-depth" style="height:350px"></div>
     </div>
   </div>
 
@@ -92,16 +100,6 @@
     </div>
   </div>
 
-  <div id="tab-quant" class="tab-content">
-    <div class="quant-controls">
-      <span class="filter-label">Model: </span>
-      <select id="filter-quant-model"><option value="">select model</option></select>
-    </div>
-    <div class="chart-container">
-      <div class="chart-spinner hidden" id="spinner-quant-impact"></div>
-      <div id="chart-quant-impact" style="height:400px"></div>
-    </div>
-  </div>
 
 </div>
 

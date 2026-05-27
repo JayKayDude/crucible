@@ -17,7 +17,7 @@ suppress_thinking = false
 # quantization is auto-detected from the model ID for LM Studio (e.g. "qwen3.6-35b-q4_k_m"
 # → "Q4_K_M"). Ollama and llama.cpp don't embed the quant in the model ID, so set it
 # manually here if you want it tracked in the dashboard:
-# quantization      = "Q4_K_M"
+quantization      = "Q8_0"
 #
 # architecture is optional — set it if you know it, otherwise leave commented out
 # architecture      = "gated-delta"
