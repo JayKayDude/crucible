@@ -15,18 +15,18 @@ Comprehensive local LLM evaluation platform. Combines lm-eval (coding/reasoning/
 
 ```
 LLM Benchmarker/
-  bench/              # codeneedle benchmark harness (Python package)
+  bench/              # benchmark harness (Python package)
   bench.py            # CLI entry point
   configs/
     models/           # per-model TOML configs
     lmeval/           # lm-eval task configs
-  results/
-    lmeval/           # lm-eval output JSON
+    corpora/          # recall corpus configs
+  fixtures/           # source files for recall + speed tests
+  results/            # generated results (gitignored)
   webapp/             # FastAPI dashboard
     routes/
     static/
-  requirements.txt        # codeneedle deps
-  requirements-extended.txt  # added: fastapi, uvicorn, lm-eval
+  requirements.txt    # all deps (fastapi, uvicorn, lm-eval, codeneedle)
 ```
 
 ## Key Rules

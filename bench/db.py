@@ -711,10 +711,18 @@ def query_filter_options(conn: sqlite3.Connection) -> dict:
         ]
 
     model_quants = [
-        {"model_name": r[0], "quantization": r[1], "hardware": r[2]}
-        for r in conn.execute(
-            "SELECT DISTINCT model_name, quantization, hardware FROM model_configs ORDER BY model_name, quantization, hardware"
-        ).fetchall()
+        dict(r)
+        for r in conn.execute("""
+            SELECT mc.model_name, mc.quantization, mc.hardware, COUNT(*) AS run_count
+            FROM model_configs mc
+            JOIN (
+                SELECT model_config_id FROM recall_runs
+                UNION ALL SELECT model_config_id FROM lmeval_runs
+                UNION ALL SELECT model_config_id FROM speed_runs
+            ) runs ON runs.model_config_id = mc.id
+            GROUP BY mc.model_name, mc.quantization, mc.hardware
+            ORDER BY mc.model_name, mc.quantization, mc.hardware
+        """).fetchall()
     ]
     return {
         "corpora":       _distinct("recall_runs", "corpus"),
@@ -725,3 +733,101 @@ def query_filter_options(conn: sqlite3.Connection) -> dict:
         "hardware":      _distinct("model_configs", "hardware"),
         "model_quants":  model_quants,
     }
+
+
+# ---------------------------------------------------------------------------
+# Data tab helpers
+# ---------------------------------------------------------------------------
+
+def query_run_detail(conn: sqlite3.Connection, run_type: str, run_id: str) -> list[dict]:
+    """Return per-result rows for a single run."""
+    if run_type == "recall":
+        rows = conn.execute(
+            """SELECT function_name, pass_rate, primary_matched, primary_total, latency_mean_s
+               FROM recall_results WHERE run_id = ? ORDER BY function_name""",
+            (run_id,),
+        ).fetchall()
+    elif run_type == "lmeval":
+        rows = conn.execute(
+            """SELECT task, metric, value, n_samples
+               FROM lmeval_results WHERE run_id = ? ORDER BY task, metric""",
+            (run_id,),
+        ).fetchall()
+    elif run_type == "speed":
+        rows = conn.execute(
+            """SELECT context_tokens, generation_tps_mean, overall_tps_mean, ttft_mean_s, n_samples
+               FROM speed_measurements WHERE run_id = ? ORDER BY context_tokens""",
+            (run_id,),
+        ).fetchall()
+    else:
+        rows = []
+    return [dict(r) for r in rows]
+
+
+def delete_runs(conn: sqlite3.Connection, runs: list[dict]) -> None:
+    """Delete runs and their results; prune orphaned model_configs."""
+    for run in runs:
+        run_type = run["type"]
+        run_id   = run["run_id"]
+        if run_type == "recall":
+            conn.execute("DELETE FROM recall_results WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM recall_runs WHERE run_id = ?", (run_id,))
+        elif run_type == "lmeval":
+            conn.execute("DELETE FROM lmeval_results WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM lmeval_runs WHERE run_id = ?", (run_id,))
+        elif run_type == "speed":
+            conn.execute("DELETE FROM speed_measurements WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM speed_runs WHERE run_id = ?", (run_id,))
+    conn.execute("""
+        DELETE FROM model_configs WHERE id NOT IN (
+            SELECT model_config_id FROM recall_runs
+            UNION SELECT model_config_id FROM lmeval_runs
+            UNION SELECT model_config_id FROM speed_runs
+        )
+    """)
+    conn.commit()
+
+
+def patch_run_meta(
+    conn: sqlite3.Connection,
+    runs: list[dict],
+    quantization: str | None,
+    hardware: str | None,
+) -> None:
+    """Re-assign runs to a new (quantization, hardware) key; create model_config if needed."""
+    _RUN_TABLE = {"recall": "recall_runs", "lmeval": "lmeval_runs", "speed": "speed_runs"}
+    for run in runs:
+        table = _RUN_TABLE.get(run["type"])
+        if not table:
+            continue
+        row = conn.execute(
+            f"SELECT mc.* FROM {table} r JOIN model_configs mc ON mc.id = r.model_config_id WHERE r.run_id = ?",
+            (run["run_id"],),
+        ).fetchone()
+        if not row:
+            continue
+        mc = dict(row)
+        new_quant = quantization if quantization is not None else mc["quantization"]
+        new_hw    = hardware    if hardware    is not None else mc["hardware"]
+        conn.execute(
+            """INSERT INTO model_configs
+                   (config_name, model_name, quantization, architecture, runtime, base_url, hardware, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(model_name, runtime, quantization, hardware) DO UPDATE SET
+                   config_name = excluded.config_name""",
+            (mc["config_name"], mc["model_name"], new_quant, mc["architecture"],
+             mc["runtime"], mc["base_url"], new_hw, _now()),
+        )
+        new_id = conn.execute(
+            "SELECT id FROM model_configs WHERE model_name=? AND runtime=? AND quantization=? AND hardware=?",
+            (mc["model_name"], mc["runtime"], new_quant, new_hw),
+        ).fetchone()["id"]
+        conn.execute(f"UPDATE {table} SET model_config_id=? WHERE run_id=?", (new_id, run["run_id"]))
+    conn.execute("""
+        DELETE FROM model_configs WHERE id NOT IN (
+            SELECT model_config_id FROM recall_runs
+            UNION SELECT model_config_id FROM lmeval_runs
+            UNION SELECT model_config_id FROM speed_runs
+        )
+    """)
+    conn.commit()

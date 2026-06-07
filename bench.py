@@ -251,7 +251,7 @@ def cmd_lmeval(args: argparse.Namespace) -> int:
     try:
         from bench.lmeval_runner import run_lmeval_suite, load_suite
     except ImportError:
-        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        print("Error: lm-eval not installed. Run: pip install -r requirements.txt")
         return 1
 
     from bench.config import load_model
@@ -297,7 +297,7 @@ def cmd_import_lmeval(args: argparse.Namespace) -> int:
     try:
         from bench.lmeval_runner import import_lmeval_results
     except ImportError:
-        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        print("Error: lm-eval not installed. Run: pip install -r requirements.txt")
         return 1
 
     from bench.config import load_model
@@ -316,7 +316,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     try:
         from bench.lmeval_runner import run_lmeval_suite, load_suite
     except ImportError:
-        print("Error: lm-eval not installed. Run: pip install -r requirements-extended.txt")
+        print("Error: lm-eval not installed. Run: pip install -r requirements.txt")
         return 1
     from bench.speed_profiler import profile_speed
     from bench.config import load_model
@@ -371,7 +371,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         from webapp.main import serve
     except ImportError:
-        print("Error: FastAPI not installed. Run: pip install -r requirements-extended.txt")
+        print("Error: FastAPI not installed. Run: pip install -r requirements.txt")
         return 1
 
     db_path = Path(getattr(args, "db", "results/benchmark.db"))

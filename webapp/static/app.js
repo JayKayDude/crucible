@@ -70,7 +70,9 @@ let _reasoningData   = [];
 let _bbhModels            = []; // models currently shown in BBH drilldown
 let _recallModels         = []; // keys currently shown in recall drilldown (max 2)
 let _recallLeaderboardData = [];
+let _recallCorpusFilter = null; // null = all corpora
 const _runSources = {};  // run_id → EventSource
+let _modelsActiveModel = null; // name of currently selected model config
 
 // ─────────────────────────────────────────────
 // Plotly base layout
@@ -666,11 +668,34 @@ async function renderRecallLeaderboard() {
   document.getElementById("recall-drilldown")?.classList.add("hidden");
   _recallModels = [];
   const f = getFilters();
-  let data = await fetchAPI("/recall/leaderboard", f).catch(() => []);
+  let allData = await fetchAPI("/recall/leaderboard", f).catch(() => []);
   hideSpinner("chart-recall-leaderboard");
 
-  if (f.architecture) data = data.filter(r => r.architecture === f.architecture);
-  data = applyModelFilter(data);
+  if (f.architecture) allData = allData.filter(r => r.architecture === f.architecture);
+  allData = applyModelFilter(allData);
+
+  // Build corpus filter bar
+  const corpora = [...new Set(allData.map(r => r.corpus).filter(Boolean))].sort();
+  const filterBar = document.getElementById("recall-corpus-filter");
+  if (filterBar) {
+    filterBar.innerHTML = '';
+    if (corpora.length > 1) {
+      [null, ...corpora].forEach(c => {
+        const btn = document.createElement('button');
+        btn.className = 'corpus-filter-btn' + (c === _recallCorpusFilter ? ' active' : '');
+        btn.textContent = c ?? 'All';
+        btn.addEventListener('click', () => {
+          _recallCorpusFilter = c;
+          renderRecallLeaderboard();
+        });
+        filterBar.appendChild(btn);
+      });
+    } else {
+      _recallCorpusFilter = null;
+    }
+  }
+
+  let data = _recallCorpusFilter ? allData.filter(r => r.corpus === _recallCorpusFilter) : allData;
   _recallLeaderboardData = data;
   if (!data.length) return emptyChart("chart-recall-leaderboard");
 
@@ -945,6 +970,47 @@ async function renderSpeed() {
 // ─────────────────────────────────────────────
 
 let _runTabInitialized = false;
+let _modelStatusInterval = null;
+
+async function refreshModelStatus(modelName) {
+  const row  = document.getElementById('model-status-row');
+  const dot  = document.getElementById('model-status-dot');
+  const text = document.getElementById('model-status-text');
+  const runBtn = document.getElementById('run-btn');
+  if (!row || !dot || !text || !runBtn) return;
+
+  let status;
+  try {
+    status = await fetchAPI(`/config/models/${encodeURIComponent(modelName)}/status`);
+  } catch (_) { return; }
+
+  if (!status.is_local) {
+    row.style.display = 'none';
+    runBtn.disabled = false;
+    runBtn.style.background = '';
+    runBtn.style.color = '';
+    runBtn.style.cursor = '';
+    return;
+  }
+
+  row.style.display = 'flex';
+  if (status.loaded) {
+    dot.className = 'model-status-dot loaded';
+    const quant = status.quantization ? ` · ${status.quantization}` : '';
+    text.textContent = `${status.model_name}${quant}`;
+    runBtn.disabled = false;
+    runBtn.style.background = '';
+    runBtn.style.color = '';
+    runBtn.style.cursor = '';
+  } else {
+    dot.className = 'model-status-dot unloaded';
+    text.textContent = 'No model loaded';
+    runBtn.disabled = true;
+    runBtn.style.background = '#374151';
+    runBtn.style.color = '#6b7280';
+    runBtn.style.cursor = 'not-allowed';
+  }
+}
 
 async function renderRun() {
   if (!_runTabInitialized) {
@@ -961,7 +1027,16 @@ async function renderRun() {
         opt.textContent = m.name;
         modelSel.appendChild(opt);
       });
+      modelSel.addEventListener('change', () => refreshModelStatus(modelSel.value));
     }
+
+    // Initial status check + 15s poll
+    if (modelSel && modelSel.value) refreshModelStatus(modelSel.value);
+    if (_modelStatusInterval) clearInterval(_modelStatusInterval);
+    _modelStatusInterval = setInterval(() => {
+      const sel = document.getElementById('run-model');
+      if (sel && sel.value) refreshModelStatus(sel.value);
+    }, 15000);
 
     // Populate corpus dropdown
     const corpora = await fetchAPI("/config/corpora").catch(() => []);
@@ -1038,9 +1113,29 @@ async function renderRun() {
         }
       });
     }
+
+    // Custom corpus file upload
+    const fileInput = document.getElementById('custom-file-input');
+    if (fileInput) {
+      fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+          await fetch('/api/config/corpora/upload', { method: 'POST', body: fd });
+        } catch (err) {
+          console.error('Upload failed:', err);
+        }
+        e.target.value = '';
+        await _refreshCustomFiles();
+        await _refreshCorpusDropdown();
+      });
+    }
+    await _refreshCustomFiles();
   }
 
-  // Check for active runs each time tab is shown
+  // Check for active runs each time tab is shown — reconnect cards after reload
   try {
     const active = await fetchAPI("/run/active");
     const noteEl = document.getElementById('run-note');
@@ -1049,7 +1144,51 @@ async function renderRun() {
       if (hasRunning) noteEl.classList.remove('hidden');
       else noteEl.classList.add('hidden');
     }
+    if (Array.isArray(active)) {
+      active
+        .filter(r => r.status === 'running' && !document.getElementById(`run-card-${r.run_id}`))
+        .forEach(r => spawnRunCard(r.run_id, r.cmd_summary));
+    }
   } catch (_) {}
+}
+
+async function _refreshCustomFiles() {
+  const list = document.getElementById('custom-files-list');
+  if (!list) return;
+  const files = await fetchAPI("/config/corpora/custom").catch(() => []);
+  list.innerHTML = '';
+  if (!files.length) {
+    const empty = document.createElement('span');
+    empty.className = 'custom-files-empty';
+    empty.textContent = 'No custom files — upload a source file to use it as a recall corpus';
+    list.appendChild(empty);
+    return;
+  }
+  files.forEach(f => {
+    const row = document.createElement('div');
+    row.className = 'custom-file-row';
+    row.innerHTML = `<span class="custom-file-name">${f.filename}</span><button class="custom-file-delete" title="Remove">✕</button>`;
+    row.querySelector('.custom-file-delete').addEventListener('click', async () => {
+      await fetchAPI(`/config/corpora/custom/${f.name}`, {}, "DELETE");
+      await _refreshCustomFiles();
+      await _refreshCorpusDropdown();
+    });
+    list.appendChild(row);
+  });
+}
+
+async function _refreshCorpusDropdown() {
+  const corpora = await fetchAPI("/config/corpora").catch(() => []);
+  const sel = document.getElementById('run-corpus');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '';
+  corpora.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c; opt.textContent = c;
+    sel.appendChild(opt);
+  });
+  if (current && sel.querySelector(`option[value="${CSS.escape(current)}"]`)) sel.value = current;
 }
 
 function spawnRunCard(run_id, label) {
@@ -1139,14 +1278,24 @@ async function renderModels() {
     item.addEventListener('click', () => {
       document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
       item.classList.add('active');
+      _modelsActiveModel = m.name;
       openModelEditor(m.name);
     });
     list.appendChild(item);
   });
   document.getElementById('model-new-btn').onclick = () => {
     document.querySelectorAll('.model-list-item').forEach(el => el.classList.remove('active'));
+    _modelsActiveModel = null;
     openModelEditor(null);
   };
+  // Restore previously selected model
+  if (_modelsActiveModel) {
+    const match = list.querySelector(`.model-list-item[data-name="${_modelsActiveModel}"]`);
+    if (match) {
+      match.classList.add('active');
+      openModelEditor(_modelsActiveModel);
+    }
+  }
 }
 
 async function openModelEditor(name) {
@@ -1163,10 +1312,14 @@ async function openModelEditor(name) {
   ];
   const BOOL_FIELDS = new Set(['suppress_thinking','stream_for_ttft','use_max_completion_tokens']);
 
+  const isLocal = name === 'local';
+  const canRename = !isNew && !isLocal;
+
   function renderForm() {
     editor.innerHTML = `
       <div class="model-editor-title">${isNew ? 'New Model Config' : `Editing: ${name}`}</div>
       ${isNew ? '<div class="model-field"><label>Config name</label><input id="mf-name" type="text" placeholder="e.g. my-model"></div>' : ''}
+      ${canRename ? '<div class="model-field"><label>Config name</label><input id="mf-rename" type="text" value="' + name + '"></div>' : ''}
       <div class="model-editor-grid">
         ${FIELDS.map(f => `
           <div class="model-field">
@@ -1180,6 +1333,7 @@ async function openModelEditor(name) {
       <div class="model-editor-actions">
         <button id="me-save" class="run-btn">Save</button>
         <button id="me-advanced" class="detail-btn">Advanced (Raw TOML)</button>
+        ${canRename ? '<button id="me-delete" class="detail-btn me-delete-btn">Delete</button>' : ''}
         <button id="me-cancel" class="detail-btn">Cancel</button>
       </div>
     `;
@@ -1193,6 +1347,9 @@ async function openModelEditor(name) {
       else renderForm();
     };
     document.getElementById('me-save').onclick = () => saveModel(false);
+    if (canRename) {
+      document.getElementById('me-delete').onclick = () => deleteModel();
+    }
   }
 
   function renderAdvanced() {
@@ -1223,8 +1380,10 @@ async function openModelEditor(name) {
 
   async function saveModel(fromAdvanced) {
     let payload = {};
-    const configName = isNew ? (document.getElementById('mf-name')?.value.trim()) : name;
-    if (!configName) { alert('Config name required'); return; }
+    const newName = isNew
+      ? (document.getElementById('mf-name')?.value.trim())
+      : canRename ? (document.getElementById('mf-rename')?.value.trim() || name) : name;
+    if (!newName) { alert('Config name required'); return; }
     if (fromAdvanced) {
       payload = { _raw_toml: document.getElementById('mf-toml').value };
     } else {
@@ -1240,15 +1399,33 @@ async function openModelEditor(name) {
     }
     try {
       if (isNew) {
-        payload.name = configName;
+        payload.name = newName;
         await fetchAPI("/config/models", payload, "POST");
+      } else if (canRename && newName !== name) {
+        // Rename: create under new name, delete old
+        payload.name = newName;
+        await fetchAPI("/config/models", payload, "POST");
+        await fetchAPI(`/config/models/${name}`, {}, "DELETE");
+        _modelsActiveModel = newName;
       } else {
-        await fetchAPI(`/config/models/${configName}`, payload, "PUT");
+        await fetchAPI(`/config/models/${name}`, payload, "PUT");
       }
       await renderModels();
       editor.innerHTML = '<span class="empty-state">Saved!</span>';
     } catch (e) {
       alert('Save failed: ' + e.message);
+    }
+  }
+
+  async function deleteModel() {
+    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+    try {
+      await fetchAPI(`/config/models/${name}`, {}, "DELETE");
+      _modelsActiveModel = null;
+      editor.innerHTML = '<span class="empty-state">Deleted.</span>';
+      await renderModels();
+    } catch (e) {
+      alert('Delete failed: ' + e.message);
     }
   }
 
@@ -1289,6 +1466,7 @@ function renderCurrentTab() {
     speed:     renderSpeed,
     run:       renderRun,
     models:    renderModels,
+    data:      renderData,
   };
   const fn = renderers[_currentTab];
   if (fn) fn().catch(err => console.error("Chart error:", err));
@@ -1366,3 +1544,384 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// ─────────────────────────────────────────────
+// Tab: Data
+// ─────────────────────────────────────────────
+
+let _dataActiveModel   = null;
+let _dataRuns          = [];
+let _dataSelected      = new Set();
+let _dataLastIdx       = -1;
+let _dataDetailKey     = null;
+let _dataSubtype       = "all";
+let _dataInitialized   = false;
+
+const _DATA_SECTION_LABELS = { recall: "RECALL", coding: "CODING", reasoning: "REASONING", speed: "SPEED" };
+
+function _runGroup(r) {
+  if (r.type === "recall") return "recall";
+  if (r.type === "speed")  return "speed";
+  if (r.type === "lmeval") {
+    return (r.task_suite && r.task_suite.startsWith("coding")) ? "coding" : "reasoning";
+  }
+  return r.type;
+}
+
+function _fmtDate(iso) {
+  const d = new Date(iso);
+  const y  = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const dy = String(d.getDate()).padStart(2, "0");
+  const h  = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${y}-${mo}-${dy} ${h}:${mi}`;
+}
+
+async function renderData() {
+  if (!_dataInitialized) {
+    _dataInitialized = true;
+    document.querySelectorAll(".data-subtab").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".data-subtab").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        _dataSubtype = btn.dataset.type;
+        _dataDetailKey = null;
+        _dataSelected.clear();
+        _renderRunList();
+        _updateDataToolbar();
+      });
+    });
+    document.getElementById("data-edit-btn").addEventListener("click", _openDataEditModal);
+    document.getElementById("data-delete-btn").addEventListener("click", _deleteDataSelected);
+    document.getElementById("data-edit-save").addEventListener("click", _saveDataEdit);
+    document.getElementById("data-edit-cancel").addEventListener("click", () => {
+      document.getElementById("data-edit-modal").classList.add("hidden");
+    });
+    document.getElementById("data-run-list").addEventListener("click", e => {
+      const row = e.target.closest(".data-run-row");
+      if (!row) return;
+      _onRunClick(row.dataset.key, parseInt(row.dataset.idx), e.shiftKey);
+    });
+  }
+
+  const opts = await fetchAPI("/filter-options").catch(() => ({}));
+  const modelQuants = opts.model_quants || [];
+  _renderDataSidebar(modelQuants);
+
+  if (_dataActiveModel) {
+    const still = modelQuants.find(m =>
+      m.model_name === _dataActiveModel.model_name &&
+      m.quantization === _dataActiveModel.quantization &&
+      m.hardware === _dataActiveModel.hardware
+    );
+    if (still) {
+      await _loadRuns();
+    } else {
+      _dataActiveModel = null;
+      document.getElementById("data-empty-state").classList.remove("hidden");
+      document.getElementById("data-content").classList.add("hidden");
+    }
+  }
+}
+
+function _renderDataSidebar(modelQuants) {
+  const list = document.getElementById("data-model-list");
+  list.innerHTML = "";
+  modelQuants.forEach(m => {
+    const item = document.createElement("div");
+    item.className = "data-model-item";
+    if (
+      _dataActiveModel &&
+      _dataActiveModel.model_name === m.model_name &&
+      _dataActiveModel.quantization === m.quantization &&
+      _dataActiveModel.hardware === m.hardware
+    ) item.classList.add("active");
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "data-model-name";
+    let label = `${m.model_name} · ${m.quantization}`;
+    if (m.hardware) label += ` · ${m.hardware}`;
+    nameSpan.textContent = label;
+
+    const countSpan = document.createElement("span");
+    countSpan.className = "data-model-count";
+    countSpan.textContent = `${m.run_count} run${m.run_count !== 1 ? "s" : ""}`;
+
+    item.appendChild(nameSpan);
+    item.appendChild(countSpan);
+    item.addEventListener("click", () => {
+      _dataActiveModel = { model_name: m.model_name, quantization: m.quantization, hardware: m.hardware };
+      document.querySelectorAll(".data-model-item").forEach(el => el.classList.remove("active"));
+      item.classList.add("active");
+      _loadRuns();
+    });
+    list.appendChild(item);
+  });
+}
+
+async function _loadRuns() {
+  document.getElementById("data-content").classList.remove("hidden");
+  document.getElementById("data-empty-state").classList.add("hidden");
+  const m = _dataActiveModel;
+  const runs = await fetchAPI("/runs", {
+    model_name:   m.model_name,
+    quantization: m.quantization,
+    hardware:     m.hardware,
+    page_size:    200,
+  }).catch(() => []);
+  _dataRuns = runs;
+  _dataSelected.clear();
+  _dataDetailKey = null;
+  _renderRunList();
+}
+
+function _renderRunList() {
+  const container = document.getElementById("data-run-list");
+  container.innerHTML = "";
+
+  const filtered = _dataSubtype === "all"
+    ? _dataRuns
+    : _dataRuns.filter(r => _runGroup(r) === _dataSubtype);
+
+  const idxMap = {};
+  filtered.forEach((r, i) => { idxMap[`${r.type}:${r.run_id}`] = i; });
+
+  function makeRow(r, flatIdx) {
+    const key = `${r.type}:${r.run_id}`;
+    const row = document.createElement("div");
+    row.className = "data-run-row" + (_dataSelected.has(key) ? " selected" : "");
+    row.dataset.key = key;
+    row.dataset.idx = flatIdx;
+
+    const check = document.createElement("span");
+    check.className = "data-check-mark";
+    check.textContent = _dataSelected.has(key) ? "✓" : "";
+
+    const dateEl = document.createElement("span");
+    dateEl.className = "data-run-date";
+    dateEl.textContent = _fmtDate(r.created_at);
+
+    const typeEl = document.createElement("span");
+    typeEl.className = "data-run-type";
+    const badge = document.createElement("span");
+    badge.className = `data-type-badge ${r.type}`;
+    badge.textContent = r.type;
+    const detail = document.createElement("span");
+    detail.className = "data-run-detail-str";
+    if (r.type === "recall") detail.textContent = ` · ${r.corpus} · ${r.n_runs} run${r.n_runs !== 1 ? "s" : ""}`;
+    else if (r.type === "lmeval") detail.textContent = ` · ${r.task_suite}`;
+    typeEl.appendChild(badge);
+    typeEl.appendChild(detail);
+
+    row.appendChild(check);
+    row.appendChild(dateEl);
+    row.appendChild(typeEl);
+    return row;
+  }
+
+  if (_dataSubtype === "all") {
+    ["recall", "coding", "reasoning", "speed"].forEach(type => {
+      const group = filtered.filter(r => _runGroup(r) === type);
+      if (!group.length) return;
+      const block = document.createElement("div");
+      block.className = "data-section-block";
+      const title = document.createElement("div");
+      title.className = "data-section-title";
+      title.textContent = _DATA_SECTION_LABELS[type];
+      block.appendChild(title);
+      group.forEach(r => block.appendChild(makeRow(r, idxMap[`${r.type}:${r.run_id}`])));
+      container.appendChild(block);
+    });
+  } else {
+    const block = document.createElement("div");
+    block.className = "data-section-block";
+    filtered.forEach((r, i) => block.appendChild(makeRow(r, i)));
+    container.appendChild(block);
+  }
+
+  _updateDataToolbar();
+
+  if (_dataSelected.size === 1 && _dataDetailKey) {
+    setTimeout(() => _openDetail(_dataDetailKey), 0);
+  }
+}
+
+function _onRunClick(key, idx, shiftKey) {
+  if (shiftKey && _dataLastIdx !== -1) {
+    const rows = document.querySelectorAll(".data-run-row");
+    const lo = Math.min(_dataLastIdx, idx);
+    const hi = Math.max(_dataLastIdx, idx);
+    rows.forEach(row => {
+      if (parseInt(row.dataset.idx) >= lo && parseInt(row.dataset.idx) <= hi) {
+        _dataSelected.add(row.dataset.key);
+      }
+    });
+    if (_dataSelected.size > 1) _dataDetailKey = null;
+  } else {
+    if (_dataSelected.size === 1 && _dataSelected.has(key)) {
+      _dataSelected.clear();
+      _dataDetailKey = null;
+    } else {
+      _dataSelected.clear();
+      _dataSelected.add(key);
+      _dataDetailKey = key;
+    }
+    _dataLastIdx = idx;
+  }
+  _renderRunList();
+  _updateDataToolbar();
+}
+
+async function _openDetail(key) {
+  document.querySelectorAll(".data-detail-row").forEach(el => el.remove());
+
+  const colonIdx = key.indexOf(":");
+  const type   = key.slice(0, colonIdx);
+  const run_id = key.slice(colonIdx + 1);
+
+  const anchor = document.querySelector(`.data-run-row[data-key="${key}"]`);
+  if (!anchor) return;
+
+  const detailDiv = document.createElement("div");
+  detailDiv.className = "data-detail-row";
+  const inner = document.createElement("div");
+  inner.className = "data-detail-inner";
+  inner.innerHTML = `<span style="color:#6b7280;font-size:0.78rem">Loading…</span>`;
+  detailDiv.appendChild(inner);
+  anchor.insertAdjacentElement("afterend", detailDiv);
+  requestAnimationFrame(() => detailDiv.classList.add("open"));
+
+  try {
+    const data = await fetchAPI(`/runs/${type}/${run_id}`);
+    _renderDetailContent(inner, type, data);
+  } catch (_) {
+    inner.innerHTML = `<span style="color:#ef4444;font-size:0.78rem">Failed to load detail.</span>`;
+  }
+}
+
+function _renderDetailContent(el, type, rows) {
+  if (!rows || !rows.length) {
+    el.innerHTML = `<span style="color:#6b7280;font-size:0.78rem">No detail data</span>`;
+    return;
+  }
+  let html = `<table class="data-detail-table">`;
+  if (type === "recall") {
+    html += `<thead><tr><th>Function</th><th>Pass Rate</th><th>Matched</th><th>Latency</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      const pr  = r.pass_rate != null ? `${(r.pass_rate * 100).toFixed(0)}%` : "—";
+      const mat = `${r.primary_matched ?? "?"}/${r.primary_total ?? "?"}`;
+      const lat = r.latency_mean_s != null ? `${r.latency_mean_s.toFixed(1)}s` : "—";
+      html += `<tr><td>${r.function_name}</td><td>${pr}</td><td>${mat}</td><td>${lat}</td></tr>`;
+    });
+  } else if (type === "lmeval") {
+    html += `<thead><tr><th>Task</th><th>Metric</th><th>Value</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      const val = `${(r.value * 100).toFixed(1)}%`;
+      html += `<tr><td>${r.task}</td><td>${r.metric}</td><td>${val}</td></tr>`;
+    });
+  } else if (type === "speed") {
+    html += `<thead><tr><th>Context</th><th>Gen TPS</th><th>Overall TPS</th><th>TTFT</th><th>N</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      const gen     = r.generation_tps_mean != null ? r.generation_tps_mean.toFixed(1) : "—";
+      const overall = r.overall_tps_mean    != null ? r.overall_tps_mean.toFixed(1)    : "—";
+      const ttft    = r.ttft_mean_s         != null ? `${r.ttft_mean_s.toFixed(2)}s`   : "—";
+      html += `<tr><td>${r.context_tokens}</td><td>${gen}</td><td>${overall}</td><td>${ttft}</td><td>${r.n_samples}</td></tr>`;
+    });
+  }
+  html += `</tbody></table>`;
+  el.innerHTML = html;
+}
+
+function _updateDataToolbar() {
+  const n = _dataSelected.size;
+  document.getElementById("data-count").textContent = n > 0 ? `${n} selected` : "";
+  document.getElementById("data-edit-btn").disabled   = n === 0;
+  document.getElementById("data-delete-btn").disabled = n === 0;
+}
+
+function _openDataEditModal() {
+  const firstKey = [..._dataSelected][0];
+  if (!firstKey) return;
+  const colonIdx = firstKey.indexOf(":");
+  const type   = firstKey.slice(0, colonIdx);
+  const run_id = firstKey.slice(colonIdx + 1);
+  const run = _dataRuns.find(r => r.type === type && r.run_id === run_id);
+  if (!run) return;
+  const n = _dataSelected.size;
+  document.getElementById("data-edit-subtitle").textContent = `Editing ${n} run${n !== 1 ? "s" : ""}`;
+  document.getElementById("data-edit-quant").value = run.quantization || "";
+  document.getElementById("data-edit-hw").value    = run.hardware    || "";
+  document.getElementById("data-edit-modal").classList.remove("hidden");
+}
+
+async function _saveDataEdit() {
+  const runs = [..._dataSelected].map(k => {
+    const colonIdx = k.indexOf(":");
+    return { type: k.slice(0, colonIdx), run_id: k.slice(colonIdx + 1) };
+  });
+  const quant = document.getElementById("data-edit-quant").value.trim();
+  const hw    = document.getElementById("data-edit-hw").value.trim();
+  const body  = { runs, hardware: hw };
+  if (quant) body.quantization = quant;
+
+  try {
+    const result = await fetchAPI("/runs/bulk-meta", body, "PATCH");
+    document.getElementById("data-edit-modal").classList.add("hidden");
+    _dataSelected.clear();
+    const modelQuants = result.model_quants || [];
+    if (_dataActiveModel) {
+      const newQuant = quant || _dataActiveModel.quantization;
+      const still = modelQuants.find(m =>
+        m.model_name === _dataActiveModel.model_name &&
+        m.quantization === newQuant &&
+        m.hardware === hw
+      );
+      _dataActiveModel = still
+        ? { model_name: still.model_name, quantization: still.quantization, hardware: still.hardware }
+        : null;
+    }
+    _renderDataSidebar(modelQuants);
+    if (_dataActiveModel) {
+      await _loadRuns();
+    } else {
+      document.getElementById("data-empty-state").classList.remove("hidden");
+      document.getElementById("data-content").classList.add("hidden");
+    }
+  } catch (e) {
+    alert(`Save failed: ${e.message || e}`);
+  }
+}
+
+async function _deleteDataSelected() {
+  const n = _dataSelected.size;
+  if (!confirm(`Delete ${n} selected run${n !== 1 ? "s" : ""}? This cannot be undone.`)) return;
+  const runs = [..._dataSelected].map(k => {
+    const colonIdx = k.indexOf(":");
+    return { type: k.slice(0, colonIdx), run_id: k.slice(colonIdx + 1) };
+  });
+  try {
+    await fetchAPI("/runs/bulk", { runs }, "DELETE");
+    _dataSelected.clear();
+    _dataDetailKey = null;
+    const opts = await fetchAPI("/filter-options").catch(() => ({}));
+    const modelQuants = opts.model_quants || [];
+    _renderDataSidebar(modelQuants);
+    if (_dataActiveModel) {
+      const still = modelQuants.find(m =>
+        m.model_name === _dataActiveModel.model_name &&
+        m.quantization === _dataActiveModel.quantization &&
+        m.hardware === _dataActiveModel.hardware
+      );
+      if (still) {
+        await _loadRuns();
+      } else {
+        _dataActiveModel = null;
+        document.getElementById("data-empty-state").classList.remove("hidden");
+        document.getElementById("data-content").classList.add("hidden");
+      }
+    }
+  } catch (e) {
+    alert(`Delete failed: ${e.message || e}`);
+  }
+}

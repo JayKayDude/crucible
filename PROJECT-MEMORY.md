@@ -83,10 +83,13 @@ python3 bench.py import-lmeval --path results/lmeval/some_run/ --model local
 
 ## Dashboard Architecture (webapp/)
 
-- **Routes:** `webapp/routes/api.py` (data queries), `run_routes.py` (run management), `config_routes.py` (TOML CRUD)
-- **Run management:** `POST /api/run` spawns bench.py subprocess, streams stdout via SSE at `GET /api/run/{id}/logs`; in-memory state in `app.state.run_state`
+- **Routes:** `webapp/routes/api.py` (data queries), `run_routes.py` (run management), `config_routes.py` (TOML CRUD + custom corpus)
+- **Run management:** `POST /api/run` spawns bench.py subprocess using `sys.executable` (not `python3`) so venv packages are always available; streams stdout via SSE at `GET /api/run/{id}/logs`; `GET /api/run/active` lists all in-memory runs; reconnect on page reload via `renderRun()` fetching `/active` on every tab visit
 - **Config CRUD:** `GET/PUT/POST/DELETE /api/config/models` — hand-rolled TOML writer (no tomlkit); reads via stdlib `tomllib`
-- **CORS:** allows GET/POST/PUT/DELETE in `webapp/main.py`
+- **Model status endpoint:** `GET /api/config/models/{name}/status` — returns `{is_local, loaded, model_name, quantization}`; used by Run tab to show live loaded-model indicator and disable Run button when nothing is in VRAM
+- **Models tab:** Delete and Rename supported for all configs except `local` (protected by `isLocal` flag in `openModelEditor`). Rename is implemented as POST new name + DELETE old name.
+- **Custom corpora:** `POST /api/config/corpora/upload` saves file to `fixtures/custom/` and writes a corpus TOML; `GET /api/config/corpora/custom` lists them; `DELETE /api/config/corpora/custom/{name}` removes both. Requires `python-multipart` in venv.
+- **CORS:** allows GET/POST/PUT/PATCH/DELETE in `webapp/main.py`
 - **Route gotcha:** use `@router.post("")` not `@router.post("/")` — a `GET /{path:path}` catch-all in main.py intercepts the 307 redirect and returns 405
 
 ## Hardware Differentiation
@@ -98,6 +101,21 @@ python3 bench.py import-lmeval --path results/lmeval/some_run/ --model local
 - **Filter panel key:** `model_name|quantization|hardware` — hardware-differentiated entries show as `Q8_0 · Apple M5` in the filter list
 - **`applyModelFilter`** matches on the same 3-part key
 - **`get_speed_comparison`** key includes hardware: `(model_name, quantization, hardware)` — prevents hardware variants from overwriting each other in bar chart
+
+## Quantization / Architecture Auto-Detection
+
+- `detect_loaded_model()` in `bench/timing.py` tries LM Studio `/api/v0/models` → Ollama `/api/ps` → `/v1/models` in order
+- LM Studio path filters out `type=embeddings` models and raises `RuntimeError` immediately if nothing has `state=loaded` (prevents fallthrough to `/v1/models` which would return the embedding model)
+- Auto-detect is **skipped** if `quantization` (or `architecture`) is already set in the config file — `if not model_cfg.quantization`
+- Cloud APIs (Anthropic, OpenAI) don't expose these endpoints; quant/arch stay `None` in the DB unless set manually in the TOML
+- `lookup_architecture()` in `bench/known_architectures.py` does substring matching on model ID (e.g. "qwen" → "gated-delta"); Claude/GPT return `None`
+
+## Playwright MCP
+
+- Configured via `claude mcp add playwright -s local -- npx @playwright/mcp@latest --browser chromium`
+- Uses Chromium (not Chrome) — no sign-out side effect, no "managed by admin" banner
+- Config stored in `.claude.json` at project root (local scope)
+- Always wait 2+ seconds after tab clicks before checking DOM state — async renders need time
 
 ## Key Implementation Fixes (from real runs)
 

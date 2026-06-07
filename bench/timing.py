@@ -86,8 +86,8 @@ def detect_loaded_model(base_url: str) -> dict:
     try:
         resp = httpx.get(f"{base_url}/api/v0/models", timeout=5.0)
         if resp.status_code == 200:
-            models = resp.json().get("data", [])
-            loaded = [m for m in models if m.get("state") == "loaded"] or models[:1]
+            models = [m for m in resp.json().get("data", []) if m.get("type") != "embeddings"]
+            loaded = [m for m in models if m.get("state") == "loaded"]
             if loaded:
                 m = loaded[0]
                 return {
@@ -95,6 +95,10 @@ def detect_loaded_model(base_url: str) -> dict:
                     "quantization": m.get("quantization"),
                     "architecture": lookup_architecture(m["id"]),
                 }
+            # LM Studio responded — if nothing is loaded, don't fall through to other runtimes
+            raise RuntimeError("No model is loaded.")
+    except RuntimeError:
+        raise
     except Exception:
         pass
 

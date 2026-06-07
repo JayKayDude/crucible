@@ -20,10 +20,20 @@ venv/
 *.key
 
 # Benchmark outputs — each user generates their own
-results/*.json
-results/*.db
-results/lmeval/
-analysis/charts/
+results/
+*.db
+
+# Playwright MCP session files
+.playwright-mcp/
+
+# Claude Code / AI session files
+CLAUDE.md
+AGENTS.md
+SESSION-STATE.md
+PROJECT-MEMORY.md
+LEARNING-LOG.md
+COMPLETION-CHECKLIST.md
+benchmark_plan.md
 
 # Venv with space in name
 .venv 2/

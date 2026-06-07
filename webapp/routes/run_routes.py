@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import uuid
 from asyncio.subprocess import PIPE, STDOUT
 from datetime import datetime, timezone
@@ -130,17 +131,17 @@ async def start_run(body: RunRequest, request: Request) -> dict:
 
     if all_suites <= suites:
         # All four — use run-all
-        cmd_str = f"python3 bench.py run-all --model {model_name} --corpus {body.corpus}"
+        cmd_str = f"{sys.executable} bench.py run-all --model {model_name} --corpus {body.corpus}"
     else:
         parts: list[str] = []
         if "recall" in suites:
-            parts.append(f"python3 bench.py recall --model {model_name} --corpus {body.corpus}")
+            parts.append(f"{sys.executable} bench.py recall --model {model_name} --corpus {body.corpus}")
         if "coding" in suites:
-            parts.append(f"python3 bench.py lmeval --suite all --model {model_name}")
+            parts.append(f"{sys.executable} bench.py lmeval --suite all --model {model_name}")
         if "reasoning" in suites:
-            parts.append(f"python3 bench.py lmeval --suite reasoning --model {model_name}")
+            parts.append(f"{sys.executable} bench.py lmeval --suite reasoning --model {model_name}")
         if "speed" in suites:
-            parts.append(f"python3 bench.py speed --model {model_name}")
+            parts.append(f"{sys.executable} bench.py speed --model {model_name}")
         if not parts:
             raise HTTPException(status_code=400, detail="No valid suites specified")
         cmd_str = " && ".join(parts)

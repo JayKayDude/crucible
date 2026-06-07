@@ -4,15 +4,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
 router = APIRouter()
 
 # Project root: webapp/routes/ -> webapp/ -> project root
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
-_MODELS_DIR = _PROJECT_ROOT / "configs" / "models"
-_CORPORA_DIR = _PROJECT_ROOT / "configs" / "corpora"
+_MODELS_DIR   = _PROJECT_ROOT / "configs" / "models"
+_CORPORA_DIR  = _PROJECT_ROOT / "configs" / "corpora"
+_CUSTOM_DIR   = _PROJECT_ROOT / "fixtures" / "custom"
 
 # All recognized TOML config fields
 _CONFIG_FIELDS = (
@@ -135,6 +136,28 @@ def get_model(name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# GET /models/{name}/status — check if the model's server has a model loaded
+# ---------------------------------------------------------------------------
+
+@router.get("/models/{name}/status")
+def get_model_status(name: str) -> dict:
+    from bench.timing import detect_loaded_model, detect_runtime
+    path = _model_path(name)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Model config not found: {name}")
+    cfg = _parse_model_file(path)
+    base_url = cfg.get("base_url", "")
+    runtime = detect_runtime(base_url, cfg.get("runtime"))
+    if runtime != "local":
+        return {"is_local": False, "loaded": True, "model_name": None, "quantization": None}
+    try:
+        info = detect_loaded_model(base_url)
+        return {"is_local": True, "loaded": True, "model_name": info["name"], "quantization": info.get("quantization")}
+    except Exception:
+        return {"is_local": True, "loaded": False, "model_name": None, "quantization": None}
+
+
+# ---------------------------------------------------------------------------
 # PUT /models/{name} — update (overwrite) a model config
 # ---------------------------------------------------------------------------
 
@@ -192,6 +215,63 @@ def list_corpora() -> list[str]:
     if not _CORPORA_DIR.exists():
         return []
     return sorted(p.stem for p in _CORPORA_DIR.glob("*.toml"))
+
+
+# ---------------------------------------------------------------------------
+# GET /corpora/custom — list user-uploaded corpus files
+# ---------------------------------------------------------------------------
+
+@router.get("/corpora/custom")
+def list_custom_corpora() -> list[dict]:
+    if not _CUSTOM_DIR.exists():
+        return []
+    return sorted(
+        [{"name": f.stem, "filename": f.name} for f in _CUSTOM_DIR.iterdir() if f.is_file()],
+        key=lambda x: x["name"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /corpora/upload — upload a source file as a new corpus
+# ---------------------------------------------------------------------------
+
+@router.post("/corpora/upload")
+async def upload_corpus_file(file: UploadFile) -> dict:
+    filename = Path(file.filename).name  # strip any path components
+    stem = Path(filename).stem
+    if not stem:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Refuse to shadow a built-in corpus
+    toml_path = _CORPORA_DIR / f"{stem}.toml"
+    if toml_path.exists() and not (_CUSTOM_DIR / filename).exists():
+        raise HTTPException(status_code=409, detail=f"A corpus named '{stem}' already exists")
+    _CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    dest = _CUSTOM_DIR / filename
+    dest.write_bytes(await file.read())
+    toml_path.write_text(
+        f'[files]\ndirectory = "fixtures/custom"\nglob = "{filename}"\nlimit = 1\n\n[sample]\nk = 16\nseed = 42\n',
+        encoding="utf-8",
+    )
+    return {"name": stem, "filename": filename}
+
+
+# ---------------------------------------------------------------------------
+# DELETE /corpora/custom/{name} — remove a user-uploaded corpus file
+# ---------------------------------------------------------------------------
+
+@router.delete("/corpora/custom/{name}")
+def delete_custom_corpus(name: str) -> dict:
+    if not _CUSTOM_DIR.exists():
+        raise HTTPException(status_code=404, detail="No custom files found")
+    matches = [f for f in _CUSTOM_DIR.iterdir() if f.stem == name and f.is_file()]
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"Custom file not found: {name}")
+    for f in matches:
+        f.unlink()
+    toml_path = _CORPORA_DIR / f"{name}.toml"
+    if toml_path.exists():
+        toml_path.unlink()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@
   <button class="tab" data-tab="speed">Speed</button>
   <button class="tab" data-tab="run">Run</button>
   <button class="tab" data-tab="models">Models</button>
+  <button class="tab" data-tab="data">Data</button>
 </nav>
 
 <div id="content">
@@ -74,6 +75,7 @@
   </div>
 
   <div id="tab-recall" class="tab-content">
+    <div id="recall-corpus-filter" class="corpus-filter-bar"></div>
     <div class="chart-container">
       <div class="chart-spinner hidden" id="spinner-recall-leaderboard"></div>
       <div id="chart-recall-leaderboard" style="height:400px"></div>
@@ -107,10 +109,14 @@
       <div class="run-row">
         <label>Model config</label>
         <select id="run-model"></select>
-        <label>Corpus (Recall)</label>
-        <select id="run-corpus"></select>
+        <div id="model-status-row" class="model-status-row" style="display:none">
+          <span class="model-status-dot" id="model-status-dot"></span>
+          <span id="model-status-text"></span>
+        </div>
       </div>
       <div class="run-row">
+        <label>Corpus (Recall)</label>
+        <select id="run-corpus"></select>
         <label>Quantization override</label>
         <input id="run-quant" type="text" placeholder="e.g. Q8_0 (blank = use config)">
         <label>Architecture</label>
@@ -131,6 +137,14 @@
       </div>
     </div>
     <div id="run-cards"></div>
+    <div class="custom-files-panel">
+      <div class="custom-files-header">
+        <span class="custom-files-title">Custom Corpus Files</span>
+        <label class="filter-btn custom-upload-btn" for="custom-file-input">＋ Add File</label>
+        <input type="file" id="custom-file-input" class="hidden">
+      </div>
+      <div id="custom-files-list" class="custom-files-list"></div>
+    </div>
   </div>
 
   <div id="tab-models" class="tab-content">
@@ -145,8 +159,52 @@
     </div>
   </div>
 
+  <div id="tab-data" class="tab-content">
+    <div class="data-split">
+      <div class="data-sidebar">
+        <div id="data-model-list"></div>
+      </div>
+      <div class="data-main">
+        <div id="data-empty-state" class="empty-state">Select a model to view its runs</div>
+        <div id="data-content" class="hidden">
+          <div class="data-subtabs">
+            <button class="data-subtab active" data-type="all">All</button>
+            <button class="data-subtab" data-type="recall">Recall</button>
+            <button class="data-subtab" data-type="coding">Coding</button>
+            <button class="data-subtab" data-type="reasoning">Reasoning</button>
+            <button class="data-subtab" data-type="speed">Speed</button>
+          </div>
+          <div class="data-toolbar">
+            <span id="data-count" class="data-count"></span>
+            <button id="data-edit-btn" class="filter-btn" disabled>Edit Selected</button>
+            <button id="data-delete-btn" class="filter-btn data-danger-btn" disabled>Delete Selected</button>
+          </div>
+          <div id="data-run-list"></div>
+        </div>
+      </div>
+    </div>
+    <div id="data-edit-modal" class="data-edit-modal hidden">
+      <div class="data-edit-form">
+        <div class="model-editor-title">Edit Metadata</div>
+        <p id="data-edit-subtitle" class="data-edit-subtitle"></p>
+        <div class="model-field">
+          <label>Quantization</label>
+          <input id="data-edit-quant" type="text" placeholder="e.g. Q8_0">
+        </div>
+        <div class="model-field">
+          <label>Hardware</label>
+          <input id="data-edit-hw" type="text" placeholder="e.g. Apple M5">
+        </div>
+        <div class="model-editor-actions">
+          <button id="data-edit-save" class="run-btn">Save</button>
+          <button id="data-edit-cancel" class="filter-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>
