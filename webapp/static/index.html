@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LLM Benchmarker</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=2">
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
@@ -35,6 +35,7 @@
   <button class="tab" data-tab="coding">Coding</button>
   <button class="tab" data-tab="reasoning">Reasoning</button>
   <button class="tab" data-tab="recall">Long Context</button>
+  <button class="tab" data-tab="toolcall">Tool Calling</button>
   <button class="tab" data-tab="speed">Speed</button>
   <button class="tab" data-tab="run">Run</button>
   <button class="tab" data-tab="models">Models</button>
@@ -91,6 +92,21 @@
     </div>
   </div>
 
+  <div id="tab-toolcall" class="tab-content">
+    <div class="chart-container">
+      <div class="chart-spinner hidden" id="spinner-toolcall-heatmap"></div>
+      <div id="chart-toolcall-heatmap" style="min-height:420px"></div>
+    </div>
+    <div id="toolcall-breakdown-panel" class="drilldown-panel hidden">
+      <div class="drilldown-header">
+        <span class="drilldown-title" id="toolcall-breakdown-title">Category Breakdown</span>
+        <button class="drilldown-close" id="toolcall-breakdown-close">✕</button>
+      </div>
+      <div class="chart-spinner hidden" id="spinner-toolcall-breakdown"></div>
+      <div id="chart-toolcall-breakdown" style="height:320px"></div>
+    </div>
+  </div>
+
   <div id="tab-speed" class="tab-content">
     <div class="chart-row">
       <div class="chart-container">
@@ -124,12 +140,47 @@
         <datalist id="arch-datalist"></datalist>
       </div>
       <div class="run-row">
+        <span id="run-corpus-size" class="run-corpus-size"></span>
+      </div>
+      <div class="run-row">
         <label>Benchmarks</label>
         <label class="suite-toggle"><input type="checkbox" id="run-all-toggle" checked> All</label>
         <label class="suite-toggle"><input type="checkbox" value="recall" checked> Recall</label>
         <label class="suite-toggle"><input type="checkbox" value="coding" checked> Coding</label>
         <label class="suite-toggle"><input type="checkbox" value="reasoning" checked> Reasoning</label>
         <label class="suite-toggle"><input type="checkbox" value="speed" checked> Speed</label>
+        <label class="suite-toggle"><input type="checkbox" value="toolcall"> Tool Calling</label>
+      </div>
+      <div id="toolcall-options" class="toolcall-options hidden">
+        <div class="tc-opt-row">
+          <label>Context padding</label>
+          <div class="tc-chip-group" id="tc-padding">
+            <button type="button" class="tc-chip active" data-kb="0">0 KB</button>
+            <button type="button" class="tc-chip" data-kb="8">8 KB</button>
+            <button type="button" class="tc-chip" data-kb="32">32 KB</button>
+            <button type="button" class="tc-chip" data-kb="64">64 KB</button>
+            <button type="button" class="tc-chip" data-kb="128">128 KB</button>
+            <button type="button" class="tc-chip" data-kb="256">256 KB</button>
+            <button type="button" class="tc-chip" data-kb="512">512 KB</button>
+            <button type="button" class="tc-chip" data-kb="1024">1 MB</button>
+            <button type="button" class="tc-chip" data-kb="2048">2 MB</button>
+            <button type="button" class="tc-chip" data-kb="3516">3.4 MB</button>
+          </div>
+        </div>
+        <div class="tc-opt-row">
+          <label>Tool counts</label>
+          <div class="tc-chip-group" id="tc-toolcounts">
+            <button type="button" class="tc-chip active" data-n="5">5</button>
+            <button type="button" class="tc-chip active" data-n="10">10</button>
+            <button type="button" class="tc-chip active" data-n="25">25</button>
+            <button type="button" class="tc-chip active" data-n="50">50</button>
+          </div>
+        </div>
+        <div class="tc-opt-row">
+          <label>Questions / category</label>
+          <input id="tc-limit" type="number" min="1" max="500" value="50" class="tc-limit-input">
+          <span id="tc-estimate" class="tc-estimate"></span>
+        </div>
       </div>
       <div class="run-row">
         <button id="run-btn" class="run-btn">&#9654; Run Benchmarks</button>
@@ -173,6 +224,7 @@
             <button class="data-subtab" data-type="coding">Coding</button>
             <button class="data-subtab" data-type="reasoning">Reasoning</button>
             <button class="data-subtab" data-type="speed">Speed</button>
+            <button class="data-subtab" data-type="toolcall">Tool Calling</button>
           </div>
           <div class="data-toolbar">
             <span id="data-count" class="data-count"></span>
@@ -189,11 +241,11 @@
         <p id="data-edit-subtitle" class="data-edit-subtitle"></p>
         <div class="model-field">
           <label>Quantization</label>
-          <input id="data-edit-quant" type="text" placeholder="e.g. Q8_0">
+          <input id="data-edit-quant" type="text" placeholder="e.g. Q8_0 (blank = keep)">
         </div>
         <div class="model-field">
           <label>Hardware</label>
-          <input id="data-edit-hw" type="text" placeholder="e.g. Apple M5">
+          <input id="data-edit-hw" type="text" placeholder="e.g. Apple M5 (blank = keep)">
         </div>
         <div class="model-editor-actions">
           <button id="data-edit-save" class="run-btn">Save</button>
@@ -205,6 +257,6 @@
 
 </div>
 
-<script src="/static/app.js?v=5"></script>
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>

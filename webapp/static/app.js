@@ -135,7 +135,9 @@ function showSpinner(chartId) {
   const el = document.getElementById("spinner-" + suffix);
   if (el) el.classList.remove("hidden");
   const chart = document.getElementById(chartId);
-  if (chart) Plotly.purge(chart);
+  // Purge only divs Plotly actually plotted — this also clears their event
+  // handlers so re-renders don't stack duplicate plotly_click listeners.
+  if (chart && chart.data) Plotly.purge(chart);
 }
 
 function hideSpinner(chartId) {
@@ -155,6 +157,17 @@ function applyModelFilter(rows) {
     const key = (r.model_name || r.config_name || "") + "|" + (r.quantization || "") + "|" + (r.hardware || "");
     return _modelFilter.has(key);
   });
+}
+
+// Uniform client-side filtering — every tab passes its rows through here so
+// the Runtime/Architecture dropdowns and the model filter behave identically
+// everywhere (every query returns runtime + architecture columns).
+function applyGlobalFilters(rows) {
+  const f = getFilters();
+  let out = rows;
+  if (f.runtime)      out = out.filter(r => r.runtime === f.runtime);
+  if (f.architecture) out = out.filter(r => r.architecture === f.architecture);
+  return applyModelFilter(out);
 }
 
 function updateLastSynced() {
@@ -191,11 +204,12 @@ function renderScoreCards(data) {
     card.appendChild(header);
 
     const metrics = [
-      { label: "Recall",     value: d.recall_pass_rate, fmt: "pct" },
-      { label: "HumanEval+", value: d.humaneval_plus,   fmt: "pct" },
-      { label: "GSM8K",      value: d.gsm8k,            fmt: "pct" },
-      { label: "IFEval",     value: d.ifeval,            fmt: "pct" },
-      { label: "Speed (~8K)", value: d.gen_tps_8k,       fmt: "tps" },
+      { label: "Recall",       value: d.recall_pass_rate,  fmt: "pct" },
+      { label: "HumanEval+",  value: d.humaneval_plus,    fmt: "pct" },
+      { label: "GSM8K",       value: d.gsm8k,             fmt: "pct" },
+      { label: "IFEval",      value: d.ifeval,             fmt: "pct" },
+      { label: "Tool Calling", value: d.toolcall_accuracy, fmt: "pct" },
+      { label: "Speed (~8K)", value: d.gen_tps_8k,        fmt: "tps" },
     ];
 
     metrics.forEach(m => {
@@ -252,6 +266,8 @@ function dismissBanner() {
   if (banner) banner.classList.add("hidden");
 }
 
+let _sseReconnectTimer = null;
+
 function initSSE() {
   const dot = document.getElementById("sse-indicator");
 
@@ -263,6 +279,8 @@ function initSSE() {
       if (dot) { dot.className = "sse-dot connected"; dot.title = "Live updates connected"; }
       _lastSyncTime = Date.now();
       updateLastSynced();
+      // Back on live updates — polling fallback no longer needed
+      if (_pollFallbackInterval) { clearInterval(_pollFallbackInterval); _pollFallbackInterval = null; }
     };
 
     _sseSource.onmessage = (e) => {
@@ -278,10 +296,13 @@ function initSSE() {
     };
 
     _sseSource.onerror = () => {
-      if (dot) { dot.className = "sse-dot disconnected"; dot.title = "Live updates disconnected — polling active"; }
+      if (dot) { dot.className = "sse-dot disconnected"; dot.title = "Live updates disconnected — polling active, retrying"; }
       _sseSource.close();
       _sseSource = null;
       startPollingFallback();
+      // Keep trying to restore the live stream instead of polling forever
+      clearTimeout(_sseReconnectTimer);
+      _sseReconnectTimer = setTimeout(connect, 15_000);
     };
   }
 
@@ -403,10 +424,9 @@ function updateModelFilter() {
 
 async function renderOverview() {
   showSpinner("chart-radar");
-  const f = getFilters();
-  let data = await fetchAPI("/overview", f).catch(() => []);
+  let data = await fetchAPI("/overview").catch(() => []);
   hideSpinner("chart-radar");
-  data = applyModelFilter(data);
+  data = applyGlobalFilters(data);
 
   if (!data.length) {
     emptyChart("chart-radar");
@@ -426,13 +446,14 @@ async function renderOverview() {
     return {
       type: "scatterpolar",
       r: [
-        d.recall_pass_rate ?? 0,
-        d.humaneval_plus   ?? 0,
-        d.gsm8k            ?? 0,
-        d.ifeval           ?? 0,
+        d.recall_pass_rate   ?? 0,
+        d.humaneval_plus     ?? 0,
+        d.gsm8k              ?? 0,
+        d.ifeval             ?? 0,
+        d.toolcall_accuracy  ?? 0,
         maxTps > 0 ? (d.gen_tps_8k ?? 0) / maxTps : 0,
       ],
-      theta: ["Long Context\nRecall", "HumanEval+", "GSM8K", "IFEval", "Speed\n(norm)"],
+      theta: ["Long Context<br>Recall", "HumanEval+", "GSM8K", "IFEval", "Tool<br>Calling", "Speed<br>(norm)"],
       fill: "toself",
       name,
       opacity,
@@ -442,7 +463,7 @@ async function renderOverview() {
   });
 
   const scored = data.map(d => {
-    const vals = [d.recall_pass_rate, d.humaneval_plus, d.gsm8k, d.ifeval].filter(v => v != null);
+    const vals = [d.recall_pass_rate, d.humaneval_plus, d.gsm8k, d.ifeval, d.toolcall_accuracy].filter(v => v != null);
     return { name: modelLabel(d), avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0 };
   }).sort((a, b) => b.avg - a.avg);
   const subtitle = scored.length ? ` — top: ${scored[0].name}` : "";
@@ -467,10 +488,9 @@ async function renderOverview() {
 
 async function renderCoding() {
   showSpinner("chart-coding-leaderboard");
-  const f = getFilters();
-  const data = await fetchAPI("/lmeval/leaderboard", { ...f, suite: "coding-standard" }).catch(() => []);
+  const data = await fetchAPI("/lmeval/leaderboard", { suite: "coding-standard" }).catch(() => []);
   hideSpinner("chart-coding-leaderboard");
-  const filtered = applyModelFilter(data);
+  const filtered = applyGlobalFilters(data);
   if (!filtered.length) return emptyChart("chart-coding-leaderboard");
 
   const pass1 = filtered.filter(d => d.metric && (d.metric.includes("pass@1") || d.metric.includes("pass_at_1")));
@@ -526,10 +546,9 @@ async function renderReasoning() {
   showSpinner("chart-reasoning-leaderboard");
   document.getElementById("reasoning-drilldown")?.classList.add("hidden");
   _bbhModels = [];
-  const f = getFilters();
-  let data = await fetchAPI("/lmeval/leaderboard", { ...f, suite: "reasoning" }).catch(() => []);
+  let data = await fetchAPI("/lmeval/leaderboard", { suite: "reasoning" }).catch(() => []);
   hideSpinner("chart-reasoning-leaderboard");
-  data = applyModelFilter(data);
+  data = applyGlobalFilters(data);
   _reasoningData = data;
   if (!data.length) return emptyChart("chart-reasoning-leaderboard");
 
@@ -667,12 +686,9 @@ async function renderRecallLeaderboard() {
   showSpinner("chart-recall-leaderboard");
   document.getElementById("recall-drilldown")?.classList.add("hidden");
   _recallModels = [];
-  const f = getFilters();
-  let allData = await fetchAPI("/recall/leaderboard", f).catch(() => []);
+  let allData = await fetchAPI("/recall/leaderboard").catch(() => []);
   hideSpinner("chart-recall-leaderboard");
-
-  if (f.architecture) allData = allData.filter(r => r.architecture === f.architecture);
-  allData = applyModelFilter(allData);
+  allData = applyGlobalFilters(allData);
 
   // Build corpus filter bar
   const corpora = [...new Set(allData.map(r => r.corpus).filter(Boolean))].sort();
@@ -709,7 +725,7 @@ async function renderRecallLeaderboard() {
     textposition: "outside",
     textfont: { size: 13 },
     marker: { color: sorted.map(d => modelColor(modelLabel(d))) },
-    customdata: sorted.map(d => JSON.stringify({ config_name: d.config_name, quantization: d.quantization, corpus: d.corpus })),
+    customdata: sorted.map(d => JSON.stringify({ config_name: d.config_name, quantization: d.quantization, corpus: d.corpus, hardware: d.hardware || "" })),
   }], {
     ...PLOTLY_LAYOUT_BASE,
     title: { text: "Long Context Recall — Codeneedle  ·  click a bar to expand", font: { color: "#fff" } },
@@ -735,10 +751,15 @@ async function renderRecallLeaderboard() {
   });
 }
 
+function _recallKey(r) {
+  return JSON.stringify({ config_name: r.config_name, quantization: r.quantization, corpus: r.corpus, hardware: r.hardware || "" });
+}
+
 function _recallKeyLabel(key) {
-  const { config_name, quantization, corpus } = JSON.parse(key);
+  const { config_name, quantization, corpus, hardware } = JSON.parse(key);
   const row = _recallLeaderboardData.find(r =>
-    r.config_name === config_name && r.quantization === quantization && r.corpus === corpus
+    r.config_name === config_name && r.quantization === quantization &&
+    r.corpus === corpus && (r.hardware || "") === (hardware || "")
   );
   return row ? modelLabel(row) : (quantization ? `${config_name} (${quantization})` : config_name);
 }
@@ -756,8 +777,8 @@ async function renderRecallDepth() {
   showSpinner("chart-recall-depth");
 
   const datasets = await Promise.all(_recallModels.map(k => {
-    const { config_name, quantization, corpus } = JSON.parse(k);
-    return fetchAPI("/recall/depth", { config_name, quantization, corpus }).catch(() => []);
+    const { config_name, quantization, corpus, hardware } = JSON.parse(k);
+    return fetchAPI("/recall/depth", { config_name, quantization, corpus, hardware }).catch(() => []);
   }));
 
   hideSpinner("chart-recall-depth");
@@ -773,14 +794,10 @@ async function renderRecallDepth() {
     addSel.innerHTML = '<option value="">＋ Add model...</option>';
     if (_recallModels.length < 2) {
       _recallLeaderboardData
-        .filter(r => {
-          const k = JSON.stringify({ config_name: r.config_name, quantization: r.quantization, corpus: r.corpus });
-          return !_recallModels.includes(k);
-        })
+        .filter(r => !_recallModels.includes(_recallKey(r)))
         .forEach(r => {
-          const k = JSON.stringify({ config_name: r.config_name, quantization: r.quantization, corpus: r.corpus });
           const opt = document.createElement("option");
-          opt.value = k;
+          opt.value = _recallKey(r);
           opt.textContent = `${modelLabel(r)} | ${r.corpus}`;
           addSel.appendChild(opt);
         });
@@ -797,18 +814,23 @@ async function renderRecallDepth() {
   const chartHeight = Math.max(300, allFuncs.length * 36 * (_recallModels.length === 1 ? 1 : 2) + 100);
   document.getElementById("chart-recall-depth").style.height = chartHeight + "px";
 
+  // primary_matched is averaged across runs (may be fractional); primary_total
+  // comes from the DB rather than assuming the 20-line default.
+  const _fmtMatched = d => d ? `${Number.isInteger(d.primary_matched) ? d.primary_matched : d.primary_matched.toFixed(1)}/${d.primary_total ?? 20}` : "";
+  const _matchedFrac = d => d ? (d.primary_matched ?? 0) / (d.primary_total || 20) : 0;
+
   if (_recallModels.length === 1) {
     const mapD = Object.fromEntries(datasets[0].map(d => [d.function_name, d]));
     const color1 = _recallModelColor(_recallKeyLabel(_recallModels[0]));
     Plotly.newPlot("chart-recall-depth", [{
       type: "bar", orientation: "h",
       y: allFuncs,
-      x: allFuncs.map(fn => (mapD[fn]?.primary_matched ?? 0) / 20),
+      x: allFuncs.map(fn => _matchedFrac(mapD[fn])),
       marker: {
         color: allFuncs.map(fn => (mapD[fn]?.pass_rate ?? 0) > 0 ? "#10b981" : hexToRgba(color1, 0.45)),
         line: { color: allFuncs.map(fn => (mapD[fn]?.pass_rate ?? 0) > 0 ? "#10b981" : color1), width: 1.5 },
       },
-      text: allFuncs.map(fn => mapD[fn] ? `${mapD[fn].primary_matched}/20` : ""),
+      text: allFuncs.map(fn => _fmtMatched(mapD[fn])),
       textposition: "outside",
       textfont: { color: "#9ca3af", size: 11 },
       customdata: allFuncs.map(fn => lineOf[fn]),
@@ -841,13 +863,13 @@ async function renderRecallDepth() {
   const mkBarTrace = (funcs, modelMap, color, label) => ({
     type: "bar", orientation: "h",
     y: funcs,
-    x: funcs.map(fn => (modelMap[fn]?.primary_matched ?? 0) / 20),
+    x: funcs.map(fn => _matchedFrac(modelMap[fn])),
     name: label,
     marker: {
       color: funcs.map(fn => (modelMap[fn]?.pass_rate ?? 0) > 0 ? color : hexToRgba(color, 0.35)),
       line: { color, width: 1 },
     },
-    text: funcs.map(fn => modelMap[fn] ? `${modelMap[fn].primary_matched}/20` : "–"),
+    text: funcs.map(fn => _fmtMatched(modelMap[fn]) || "–"),
     textposition: "outside",
     textfont: { color: "#9ca3af", size: 10 },
     customdata: funcs.map(fn => lineOf[fn]),
@@ -878,13 +900,12 @@ async function renderRecallDepth() {
 async function renderSpeed() {
   showSpinner("chart-speed-curves");
   showSpinner("chart-speed-bar");
-  const f = getFilters();
   let [curves, bar] = await Promise.all([
-    fetchAPI("/speed/curves", f).catch(() => []),
-    fetchAPI("/speed/comparison", { ...f, context_tokens: 8192 }).catch(() => []),
+    fetchAPI("/speed/curves").catch(() => []),
+    fetchAPI("/speed/comparison", { context_tokens: 8192 }).catch(() => []),
   ]);
-  curves = applyModelFilter(curves);
-  bar    = applyModelFilter(bar);
+  curves = applyGlobalFilters(curves);
+  bar    = applyGlobalFilters(bar);
   hideSpinner("chart-speed-curves");
   hideSpinner("chart-speed-bar");
 
@@ -962,8 +983,147 @@ async function renderSpeed() {
 }
 
 // ─────────────────────────────────────────────
-// Tab 7: Quant Impact
+// Tab: Tool Calling
 // ─────────────────────────────────────────────
+
+async function renderToolCalling() {
+  showSpinner("chart-toolcall-heatmap");
+  let data = await fetchAPI("/toolcall/heatmap").catch(() => []);
+  data = applyGlobalFilters(data);
+  hideSpinner("chart-toolcall-heatmap");
+
+  const container = document.getElementById("chart-toolcall-heatmap");
+  // Purge any previous per-model plots so click handlers don't accumulate
+  container.querySelectorAll("div").forEach(d => { if (d.data) Plotly.purge(d); });
+
+  if (!data.length) {
+    emptyChart("chart-toolcall-heatmap");
+    document.getElementById("toolcall-breakdown-panel").classList.add("hidden");
+    return;
+  }
+
+  container.innerHTML = "";
+  container.style.height = "auto";
+
+  // One heatmap per model config — same label format as every other tab
+  const groups = new Map();
+  data.forEach(d => {
+    const label = modelLabel(d);
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(d);
+  });
+
+  groups.forEach((rows, label) => {
+    const toolCounts    = [...new Set(rows.map(r => r.tool_count))].sort((a, b) => a - b);
+    const contextSizes  = [...new Set(rows.map(r => r.context_bytes))].sort((a, b) => a - b);
+    // Label the padding axis in tokens — the meaningful "does it fit context"
+    // unit — since padding now ranges up to ~900K tokens (multi-MB).
+    const contextLabels = contextSizes.map(_paddingTokenLabel);
+    const toolCountLabels = toolCounts.map(n => `${n} tools`);
+
+    // z matrix: rows = context_bytes, cols = tool_count.
+    // `accuracy` counts correct refusals on irrelevance questions as wins —
+    // same math as the Overview radar.
+    const z = contextSizes.map(cb =>
+      toolCounts.map(tc => {
+        const cell = rows.find(r => r.tool_count === tc && r.context_bytes === cb);
+        return cell ? (cell.accuracy ?? cell.arg_accuracy ?? null) : null;
+      })
+    );
+    const textVals = z.map(row => row.map(v => v !== null ? `${(v * 100).toFixed(1)}%` : "—"));
+
+    const div = document.createElement("div");
+    div.style.height = "420px";
+    container.appendChild(div);
+
+    Plotly.newPlot(div, [{
+      type: "heatmap",
+      z,
+      x: toolCountLabels,
+      y: contextLabels,
+      text: textVals,
+      texttemplate: "%{text}",
+      colorscale: [[0, "#ef4444"], [0.5, "#f59e0b"], [1, "#22c55e"]],
+      zmin: 0, zmax: 1,
+      showscale: true,
+      colorbar: { title: "Accuracy", tickformat: ".0%", tickfont: { color: "#9ca3af" }, titlefont: { color: "#9ca3af" } },
+      hovertemplate: "Tools: %{x}<br>Padding: %{y} tok<br>Accuracy: %{text}<extra></extra>",
+    }], {
+      ...PLOTLY_LAYOUT_BASE,
+      title: { text: `Tool-Calling Accuracy — ${label}  ·  click a cell for categories`, font: { color: "#fff" } },
+      // Force categorical axes so a lone numeric-looking label (e.g. "0")
+      // doesn't flip an axis to a continuous scale.
+      xaxis: { title: "Tool count", color: "#9ca3af", type: "category" },
+      yaxis: { title: "Context padding (est. tokens)", color: "#9ca3af", type: "category", autorange: "reversed" },
+      margin: { ...PLOTLY_LAYOUT_BASE.margin, r: 80 },
+    }, { responsive: true });
+
+    div.style.cursor = "pointer";
+    const modelRow = rows[0];
+    div.on("plotly_click", async e => {
+      const pt = e.points[0];
+      // Resolve the cell by index; fall back to label lookup (never parse the
+      // token label, which isn't a plain number).
+      const pn = Array.isArray(pt.pointNumber) ? pt.pointNumber
+               : Array.isArray(pt.pointIndex)  ? pt.pointIndex : null;
+      const colIdx = pn ? pn[1] : toolCountLabels.indexOf(pt.x);
+      const rowIdx = pn ? pn[0] : contextLabels.indexOf(pt.y);
+      const tc = toolCounts[colIdx];
+      const cb = contextSizes[rowIdx];
+      if (tc !== undefined && cb !== undefined) {
+        await _renderToolcallBreakdown(modelRow, label, tc, cb);
+      }
+    });
+  });
+}
+
+async function _renderToolcallBreakdown(modelRow, label, tool_count, context_bytes) {
+  const panel = document.getElementById("toolcall-breakdown-panel");
+  panel.classList.remove("hidden");
+  showSpinner("chart-toolcall-breakdown");
+
+  const cbLabel = context_bytes === 0 ? "no padding" : `~${_paddingTokenLabel(context_bytes)} tok padding`;
+  document.getElementById("toolcall-breakdown-title").textContent =
+    `Category Breakdown — ${label} · ${tool_count} tools · ${cbLabel}`;
+
+  const params = {
+    model_config: modelRow.config_name,
+    quantization: modelRow.quantization,
+    hardware:     modelRow.hardware,
+    tool_count,
+    context_bytes,
+  };
+  const data = await fetchAPI("/toolcall/breakdown", params).catch(() => []);
+  hideSpinner("chart-toolcall-breakdown");
+
+  if (!data.length) { emptyChart("chart-toolcall-breakdown"); return; }
+
+  const cats = [...new Set(data.map(r => r.category))];
+  const catValue = c => {
+    const r = data.find(d => d.category === c);
+    if (!r) return null;
+    return c === "irrelevance" ? (r.irrelevance_accuracy ?? null) : (r.arg_accuracy ?? null);
+  };
+
+  Plotly.newPlot("chart-toolcall-breakdown", [{
+    type: "bar",
+    name: label,
+    x: cats,
+    y: cats.map(catValue),
+    marker: { color: modelColor(label) },
+    text: cats.map(c => {
+      const v = catValue(c);
+      return v !== null && v !== undefined ? `${(v * 100).toFixed(1)}%` : "";
+    }),
+    textposition: "outside",
+  }], {
+    ...PLOTLY_LAYOUT_BASE,
+    title: { text: "Accuracy by Category (irrelevance = correct refusals)", font: { color: "#fff" } },
+    xaxis: { color: "#9ca3af" },
+    yaxis: { title: "Accuracy", tickformat: ".0%", range: [0, 1.15], color: "#9ca3af" },
+    showlegend: false,
+  }, { responsive: true });
+}
 
 // ─────────────────────────────────────────────
 // Tab: Run
@@ -1012,6 +1172,100 @@ async function refreshModelStatus(modelName) {
   }
 }
 
+// Corpus size labels — help judge whether a recall corpus fits in the model's
+// context window before running it. Sizes come from the backend (byte count +
+// token estimate); the token figure is approximate (~3.8 chars/token).
+let _corpusInfo = {};  // name → { n_files, bytes, est_tokens }
+
+function _fmtBytes(b) {
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+  if (b >= 1024)    return Math.round(b / 1024) + ' KB';
+  return b + ' B';
+}
+function _fmtTokens(t) {
+  if (t >= 1000) return (t / 1000).toFixed(t >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'K';
+  return String(t);
+}
+function _corpusOptionLabel(c) {
+  if (!c.bytes) return c.name;
+  const files = c.n_files > 1 ? ` · ${c.n_files} files` : '';
+  return `${c.name}  —  ~${_fmtTokens(c.est_tokens)} tok · ${_fmtBytes(c.bytes)}${files}`;
+}
+function _populateCorpusSelect(sel, corpora, keepCurrent) {
+  _corpusInfo = {};
+  const current = keepCurrent ? sel.value : null;
+  sel.innerHTML = '';
+  corpora.forEach(c => {
+    _corpusInfo[c.name] = c;
+    const opt = document.createElement('option');
+    opt.value = c.name;
+    opt.textContent = _corpusOptionLabel(c);
+    sel.appendChild(opt);
+  });
+  if (current && sel.querySelector(`option[value="${CSS.escape(current)}"]`)) sel.value = current;
+  _updateCorpusSizeHint();
+}
+function _updateCorpusSizeHint() {
+  const sel  = document.getElementById('run-corpus');
+  const hint = document.getElementById('run-corpus-size');
+  if (!sel || !hint) return;
+  const c = _corpusInfo[sel.value];
+  if (!c || !c.bytes) { hint.textContent = ''; return; }
+  const files = c.n_files > 1 ? ` across ${c.n_files} files` : '';
+  hint.textContent = `≈ ${_fmtTokens(c.est_tokens)} tokens (${_fmtBytes(c.bytes)}${files}) — must fit the model's context`;
+}
+
+// Tool Calling run options — the panel is only meaningful when the toolcall
+// suite is selected. Requests = BFCL categories (4) × tool counts × padding
+// sizes × questions-per-category.
+const _TOOLCALL_CATEGORIES = 4;
+const _TOOLCALL_WARN_THRESHOLD = 1500;
+// Padding filler is English prose (~4 chars/token), unlike the code corpora.
+const _PADDING_CHARS_PER_TOKEN = 4;
+
+// KB → "512 KB" / "3.4 MB"
+function _fmtPaddingSize(kb) {
+  if (kb < 1024) return `${kb} KB`;
+  return `${(kb / 1024).toFixed(1).replace(/\.0$/, '')} MB`;
+}
+// bytes → estimated-token label ("0", "2K", "900K")
+function _paddingTokenLabel(bytes) {
+  return bytes === 0 ? "0" : _fmtTokens(Math.round(bytes / _PADDING_CHARS_PER_TOKEN));
+}
+
+// Annotate each padding chip with its size + approximate token count (derived
+// from data-kb so the labels can't drift from the actual sizes).
+function _labelPaddingChips() {
+  document.querySelectorAll('#tc-padding .tc-chip').forEach(chip => {
+    const kb = parseInt(chip.dataset.kb) || 0;
+    if (kb === 0) { chip.textContent = '0 KB'; return; }
+    const tok = Math.round(kb * 1024 / _PADDING_CHARS_PER_TOKEN);
+    chip.innerHTML = `${_fmtPaddingSize(kb)} <span class="tc-chip-sub">· ~${_fmtTokens(tok)} tok</span>`;
+  });
+}
+
+function _updateToolcallPanel() {
+  const cb = document.querySelector('.suite-toggle input[value="toolcall"]');
+  const panel = document.getElementById('toolcall-options');
+  if (!panel) return;
+  panel.classList.toggle('hidden', !(cb && cb.checked));
+  _updateToolcallEstimate();
+}
+
+function _updateToolcallEstimate() {
+  const est = document.getElementById('tc-estimate');
+  if (!est) return;
+  const pads  = document.querySelectorAll('#tc-padding .tc-chip.active').length;
+  const tcs   = document.querySelectorAll('#tc-toolcounts .tc-chip.active').length;
+  const limit = parseInt(document.getElementById('tc-limit')?.value) || 0;
+  const total = _TOOLCALL_CATEGORIES * tcs * pads * limit;
+  est.textContent =
+    `→ ${_TOOLCALL_CATEGORIES} cat × ${tcs} tools × ${pads} pad × ${limit} = ${total.toLocaleString()} requests`;
+  const big = total > _TOOLCALL_WARN_THRESHOLD;
+  est.classList.toggle('warn', big);
+  if (big) est.textContent += '  ⚠ large run — may take hours';
+}
+
 async function renderRun() {
   if (!_runTabInitialized) {
     _runTabInitialized = true;
@@ -1038,17 +1292,12 @@ async function renderRun() {
       if (sel && sel.value) refreshModelStatus(sel.value);
     }, 15000);
 
-    // Populate corpus dropdown
+    // Populate corpus dropdown (with size labels + a fit hint)
     const corpora = await fetchAPI("/config/corpora").catch(() => []);
     const corpusSel = document.getElementById('run-corpus');
     if (corpusSel) {
-      corpusSel.innerHTML = '';
-      corpora.forEach(c => {
-        const opt = document.createElement('option');
-        opt.value = c;
-        opt.textContent = c;
-        corpusSel.appendChild(opt);
-      });
+      _populateCorpusSelect(corpusSel, corpora, false);
+      corpusSel.addEventListener('change', _updateCorpusSizeHint);
     }
 
     // Populate architecture datalist
@@ -1072,25 +1321,45 @@ async function renderRun() {
         });
       });
     }
-    document.querySelectorAll('.suite-toggle input[value]').forEach(cb => {
-      cb.addEventListener('change', () => {
-        const all = [...document.querySelectorAll('.suite-toggle input[value]')];
-        const checked = all.filter(c => c.checked).length;
-        const allToggleEl = document.getElementById('run-all-toggle');
-        if (allToggleEl) {
-          if (checked === all.length) {
-            allToggleEl.checked = true;
-            allToggleEl.indeterminate = false;
-          } else if (checked === 0) {
-            allToggleEl.checked = false;
-            allToggleEl.indeterminate = false;
-          } else {
-            allToggleEl.checked = false;
-            allToggleEl.indeterminate = true;
-          }
+    const syncAllToggle = () => {
+      const all = [...document.querySelectorAll('.suite-toggle input[value]')];
+      const checked = all.filter(c => c.checked).length;
+      const allToggleEl = document.getElementById('run-all-toggle');
+      if (allToggleEl) {
+        if (checked === all.length) {
+          allToggleEl.checked = true;
+          allToggleEl.indeterminate = false;
+        } else if (checked === 0) {
+          allToggleEl.checked = false;
+          allToggleEl.indeterminate = false;
+        } else {
+          allToggleEl.checked = false;
+          allToggleEl.indeterminate = true;
         }
+      }
+    };
+    document.querySelectorAll('.suite-toggle input[value]').forEach(cb => {
+      cb.addEventListener('change', () => { syncAllToggle(); _updateToolcallPanel(); });
+    });
+    if (allToggle) allToggle.addEventListener('change', _updateToolcallPanel);
+    syncAllToggle();  // initial state: toolcall unchecked → "All" indeterminate
+
+    // Tool Calling options: reveal padding/tool-count/limit controls when the
+    // toolcall suite is selected, with a live request-count estimate.
+    document.querySelectorAll('#toolcall-options .tc-chip-group').forEach(group => {
+      group.addEventListener('click', e => {
+        const chip = e.target.closest('.tc-chip');
+        if (!chip) return;
+        // Keep at least one chip active per group
+        if (chip.classList.contains('active') &&
+            group.querySelectorAll('.tc-chip.active').length === 1) return;
+        chip.classList.toggle('active');
+        _updateToolcallEstimate();
       });
     });
+    document.getElementById('tc-limit')?.addEventListener('input', _updateToolcallEstimate);
+    _labelPaddingChips();    // annotate padding chips with token counts
+    _updateToolcallPanel();  // initial visibility + estimate
 
     // Run button
     const runBtn = document.getElementById('run-btn');
@@ -1103,8 +1372,16 @@ async function renderRun() {
         const quantization = document.getElementById('run-quant').value || null;
         const architecture = document.getElementById('run-arch').value || null;
         if (!model || !suites.length) return;
+        const body = { model, corpus, suites, quantization, architecture };
+        if (suites.includes('toolcall')) {
+          body.context_padding_kb = [...document.querySelectorAll('#tc-padding .tc-chip.active')]
+            .map(c => parseInt(c.dataset.kb));
+          body.tool_counts = [...document.querySelectorAll('#tc-toolcounts .tc-chip.active')]
+            .map(c => parseInt(c.dataset.n));
+          body.toolcall_limit = parseInt(document.getElementById('tc-limit').value) || 50;
+        }
         try {
-          const { run_id } = await fetchAPI("/run", { model, corpus, suites, quantization, architecture }, "POST");
+          const { run_id } = await fetchAPI("/run", body, "POST");
           const label = `${model} · ${suites.join('+')}`;
           spawnRunCard(run_id, label);
           document.getElementById('run-note').classList.add('hidden');
@@ -1167,7 +1444,10 @@ async function _refreshCustomFiles() {
   files.forEach(f => {
     const row = document.createElement('div');
     row.className = 'custom-file-row';
-    row.innerHTML = `<span class="custom-file-name">${f.filename}</span><button class="custom-file-delete" title="Remove">✕</button>`;
+    const size = f.bytes ? `~${_fmtTokens(f.est_tokens)} tok · ${_fmtBytes(f.bytes)}` : '';
+    row.innerHTML = `<span class="custom-file-name">${f.filename}</span>` +
+      `<span class="custom-file-size">${size}</span>` +
+      `<button class="custom-file-delete" title="Remove">✕</button>`;
     row.querySelector('.custom-file-delete').addEventListener('click', async () => {
       await fetchAPI(`/config/corpora/custom/${f.name}`, {}, "DELETE");
       await _refreshCustomFiles();
@@ -1181,14 +1461,7 @@ async function _refreshCorpusDropdown() {
   const corpora = await fetchAPI("/config/corpora").catch(() => []);
   const sel = document.getElementById('run-corpus');
   if (!sel) return;
-  const current = sel.value;
-  sel.innerHTML = '';
-  corpora.forEach(c => {
-    const opt = document.createElement('option');
-    opt.value = c; opt.textContent = c;
-    sel.appendChild(opt);
-  });
-  if (current && sel.querySelector(`option[value="${CSS.escape(current)}"]`)) sel.value = current;
+  _populateCorpusSelect(sel, corpora, true);
 }
 
 function spawnRunCard(run_id, label) {
@@ -1202,11 +1475,18 @@ function spawnRunCard(run_id, label) {
       <span class="run-card-title">${label}</span>
       <span class="run-card-age" id="age-${run_id}">just now</span>
       <button class="run-cancel-btn" id="cancel-${run_id}">Cancel</button>
-      <button class="run-dismiss-btn" id="dismiss-${run_id}">&#x2715;</button>
+      <button class="run-dismiss-btn" id="dismiss-${run_id}" style="display:none">&#x2715;</button>
     </div>
     <pre class="run-log" id="log-${run_id}"></pre>
   `;
   document.getElementById('run-cards').prepend(card);
+
+  // While running only Cancel is shown; ✕ appears once the run has finished
+  // and only removes the card — it never cancels anything.
+  const showDismiss = () => {
+    const d = document.getElementById(`dismiss-${run_id}`);
+    if (d) d.style.display = '';
+  };
 
   // Age timer
   const ageInterval = setInterval(() => {
@@ -1232,6 +1512,7 @@ function spawnRunCard(run_id, label) {
       if (cancelBtn) cancelBtn.style.display = 'none';
       const ageEl = document.getElementById(`age-${run_id}`);
       if (ageEl) ageEl.textContent = 'Done';
+      showDismiss();
       clearInterval(ageInterval);
     }
   };
@@ -1239,24 +1520,23 @@ function spawnRunCard(run_id, label) {
     const dot = document.getElementById(`dot-${run_id}`);
     if (dot && dot.classList.contains('running')) dot.className = 'run-status-dot error';
     src.close(); delete _runSources[run_id];
+    showDismiss();
   };
 
-  // Cancel button
+  // Cancel button — the only way to stop a run
   document.getElementById(`cancel-${run_id}`).addEventListener('click', async () => {
     await fetchAPI(`/run/${run_id}`, {}, "DELETE");
     if (_runSources[run_id]) { _runSources[run_id].close(); delete _runSources[run_id]; }
     const dot = document.getElementById(`dot-${run_id}`);
     if (dot) dot.className = 'run-status-dot cancelled';
     document.getElementById(`cancel-${run_id}`).style.display = 'none';
+    showDismiss();
     clearInterval(ageInterval);
   });
 
-  // Dismiss button
-  document.getElementById(`dismiss-${run_id}`).addEventListener('click', async () => {
-    if (_runSources[run_id]) {
-      await fetchAPI(`/run/${run_id}`, {}, "DELETE").catch(() => {});
-      _runSources[run_id].close(); delete _runSources[run_id];
-    }
+  // Dismiss button — removes the card only, never touches the run
+  document.getElementById(`dismiss-${run_id}`).addEventListener('click', () => {
+    if (_runSources[run_id]) { _runSources[run_id].close(); delete _runSources[run_id]; }
     clearInterval(ageInterval);
     document.getElementById(`run-card-${run_id}`)?.remove();
   });
@@ -1305,12 +1585,14 @@ async function openModelEditor(name) {
   let showingAdvanced = false;
 
   const FIELDS = [
-    'base_url','api_key','api_key_file','runtime',
+    'base_url','api_key','api_key_file','api_key_env','runtime',
     'temperature','max_tokens','timeout','quantization',
-    'architecture','lmeval_tokenizer','suppress_thinking',
+    'architecture','hardware','lmeval_tokenizer','suppress_thinking',
+    'prefill_no_think','relax_indent','runs_per_function',
     'stream_for_ttft','reasoning_effort','use_max_completion_tokens'
   ];
-  const BOOL_FIELDS = new Set(['suppress_thinking','stream_for_ttft','use_max_completion_tokens']);
+  const BOOL_FIELDS = new Set(['suppress_thinking','prefill_no_think','relax_indent',
+                               'stream_for_ttft','use_max_completion_tokens']);
 
   const isLocal = name === 'local';
   const canRename = !isNew && !isLocal;
@@ -1353,7 +1635,9 @@ async function openModelEditor(name) {
   }
 
   function renderAdvanced() {
-    const tomlLines = FIELDS.map(f => {
+    // Existing configs: show the actual file contents (comments included).
+    // New configs: build a starter skeleton from any structured values.
+    const tomlText = data._raw_toml ?? FIELDS.map(f => {
       const val = data[f];
       if (val === null || val === undefined || val === '') return null;
       if (typeof val === 'boolean') return `${f} = ${val}`;
@@ -1363,7 +1647,7 @@ async function openModelEditor(name) {
     editor.innerHTML = `
       <div class="model-editor-title">${isNew ? 'New Model Config' : `Editing: ${name}`} — Raw TOML</div>
       ${isNew ? `<div class="model-field"><label>Config name</label><input id="mf-name" type="text" placeholder="e.g. my-model" value="${data.name||''}"></div>` : ''}
-      <textarea id="mf-toml" class="model-toml-textarea" rows="18">${tomlLines}</textarea>
+      <textarea id="mf-toml" class="model-toml-textarea" rows="18">${tomlText}</textarea>
       <div class="model-editor-actions">
         <button id="me-save" class="run-btn">Save</button>
         <button id="me-advanced" class="detail-btn">Structured Form</button>
@@ -1387,13 +1671,15 @@ async function openModelEditor(name) {
     if (fromAdvanced) {
       payload = { _raw_toml: document.getElementById('mf-toml').value };
     } else {
+      // Merge-on-save: blank field = delete that key; fields absent from the
+      // form (name, stop, ...) are preserved by the backend.
       FIELDS.forEach(f => {
         const el = document.getElementById(`mf-${f}`);
         if (!el) return;
         const v = el.value.trim();
-        if (v === '') return;
+        if (v === '') { payload[f] = null; return; }
         if (BOOL_FIELDS.has(f)) payload[f] = v === 'true';
-        else if (!isNaN(v) && v !== '') payload[f] = Number(v);
+        else if (!isNaN(v)) payload[f] = Number(v);
         else payload[f] = v;
       });
     }
@@ -1401,14 +1687,12 @@ async function openModelEditor(name) {
       if (isNew) {
         payload.name = newName;
         await fetchAPI("/config/models", payload, "POST");
-      } else if (canRename && newName !== name) {
-        // Rename: create under new name, delete old
-        payload.name = newName;
-        await fetchAPI("/config/models", payload, "POST");
-        await fetchAPI(`/config/models/${name}`, {}, "DELETE");
-        _modelsActiveModel = newName;
       } else {
-        await fetchAPI(`/config/models/${name}`, payload, "PUT");
+        if (canRename && newName !== name) {
+          payload._rename = newName;   // backend renames the file, keeping every field
+          _modelsActiveModel = newName;
+        }
+        await fetchAPI(`/config/models/${encodeURIComponent(name)}`, payload, "PUT");
       }
       await renderModels();
       editor.innerHTML = '<span class="empty-state">Saved!</span>';
@@ -1463,6 +1747,7 @@ function renderCurrentTab() {
     coding:    renderCoding,
     reasoning: renderReasoning,
     recall:    renderRecallLeaderboard,
+    toolcall:  renderToolCalling,
     speed:     renderSpeed,
     run:       renderRun,
     models:    renderModels,
@@ -1507,6 +1792,11 @@ async function init() {
     document.getElementById("recall-drilldown").classList.add("hidden");
     Plotly.purge(document.getElementById("chart-recall-depth"));
     _recallModels = [];
+  });
+
+  document.getElementById("toolcall-breakdown-close").addEventListener("click", () => {
+    document.getElementById("toolcall-breakdown-panel").classList.add("hidden");
+    Plotly.purge(document.getElementById("chart-toolcall-breakdown"));
   });
 
   document.getElementById("recall-add-model").addEventListener("change", e => {
@@ -1557,11 +1847,12 @@ let _dataDetailKey     = null;
 let _dataSubtype       = "all";
 let _dataInitialized   = false;
 
-const _DATA_SECTION_LABELS = { recall: "RECALL", coding: "CODING", reasoning: "REASONING", speed: "SPEED" };
+const _DATA_SECTION_LABELS = { recall: "RECALL", coding: "CODING", reasoning: "REASONING", speed: "SPEED", toolcall: "TOOL CALLING" };
 
 function _runGroup(r) {
-  if (r.type === "recall") return "recall";
-  if (r.type === "speed")  return "speed";
+  if (r.type === "recall")   return "recall";
+  if (r.type === "speed")    return "speed";
+  if (r.type === "toolcall") return "toolcall";
   if (r.type === "lmeval") {
     return (r.task_suite && r.task_suite.startsWith("coding")) ? "coding" : "reasoning";
   }
@@ -1684,8 +1975,10 @@ function _renderRunList() {
     ? _dataRuns
     : _dataRuns.filter(r => _runGroup(r) === _dataSubtype);
 
-  const idxMap = {};
-  filtered.forEach((r, i) => { idxMap[`${r.type}:${r.run_id}`] = i; });
+  // Rows are indexed in VISUAL order (the "All" view groups by section, which
+  // reorders them) so shift-click selects the rows you actually see between
+  // the two clicks.
+  let visualIdx = 0;
 
   function makeRow(r, flatIdx) {
     const key = `${r.type}:${r.run_id}`;
@@ -1711,6 +2004,7 @@ function _renderRunList() {
     detail.className = "data-run-detail-str";
     if (r.type === "recall") detail.textContent = ` · ${r.corpus} · ${r.n_runs} run${r.n_runs !== 1 ? "s" : ""}`;
     else if (r.type === "lmeval") detail.textContent = ` · ${r.task_suite}`;
+    else if (r.type === "toolcall") detail.textContent = ` · ${r.task_suite || "bfcl-v4"}`;
     typeEl.appendChild(badge);
     typeEl.appendChild(detail);
 
@@ -1721,7 +2015,7 @@ function _renderRunList() {
   }
 
   if (_dataSubtype === "all") {
-    ["recall", "coding", "reasoning", "speed"].forEach(type => {
+    ["recall", "coding", "reasoning", "speed", "toolcall"].forEach(type => {
       const group = filtered.filter(r => _runGroup(r) === type);
       if (!group.length) return;
       const block = document.createElement("div");
@@ -1730,7 +2024,7 @@ function _renderRunList() {
       title.className = "data-section-title";
       title.textContent = _DATA_SECTION_LABELS[type];
       block.appendChild(title);
-      group.forEach(r => block.appendChild(makeRow(r, idxMap[`${r.type}:${r.run_id}`])));
+      group.forEach(r => block.appendChild(makeRow(r, visualIdx++)));
       container.appendChild(block);
     });
   } else {
@@ -1828,6 +2122,14 @@ function _renderDetailContent(el, type, rows) {
       const ttft    = r.ttft_mean_s         != null ? `${r.ttft_mean_s.toFixed(2)}s`   : "—";
       html += `<tr><td>${r.context_tokens}</td><td>${gen}</td><td>${overall}</td><td>${ttft}</td><td>${r.n_samples}</td></tr>`;
     });
+  } else if (type === "toolcall") {
+    html += `<thead><tr><th>Category</th><th>Tools</th><th>N</th><th>Tool Acc</th><th>Arg Acc</th><th>Irr Acc</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      const tool = r.tool_accuracy        != null ? `${(r.tool_accuracy * 100).toFixed(0)}%`        : "—";
+      const arg  = r.arg_accuracy         != null ? `${(r.arg_accuracy  * 100).toFixed(0)}%`        : "—";
+      const irr  = r.irrelevance_accuracy != null ? `${(r.irrelevance_accuracy * 100).toFixed(0)}%` : "—";
+      html += `<tr><td>${r.category}</td><td>${r.tool_count}</td><td>${r.n_questions}</td><td>${tool}</td><td>${arg}</td><td>${irr}</td></tr>`;
+    });
   }
   html += `</tbody></table>`;
   el.innerHTML = html;
@@ -1860,10 +2162,13 @@ async function _saveDataEdit() {
     const colonIdx = k.indexOf(":");
     return { type: k.slice(0, colonIdx), run_id: k.slice(colonIdx + 1) };
   });
+  // Blank = leave unchanged, for both fields (previously a blank hardware
+  // silently cleared it on every selected run)
   const quant = document.getElementById("data-edit-quant").value.trim();
   const hw    = document.getElementById("data-edit-hw").value.trim();
-  const body  = { runs, hardware: hw };
+  const body  = { runs };
   if (quant) body.quantization = quant;
+  if (hw)    body.hardware = hw;
 
   try {
     const result = await fetchAPI("/runs/bulk-meta", body, "PATCH");
@@ -1872,10 +2177,11 @@ async function _saveDataEdit() {
     const modelQuants = result.model_quants || [];
     if (_dataActiveModel) {
       const newQuant = quant || _dataActiveModel.quantization;
+      const newHw    = hw    || _dataActiveModel.hardware;
       const still = modelQuants.find(m =>
         m.model_name === _dataActiveModel.model_name &&
         m.quantization === newQuant &&
-        m.hardware === hw
+        m.hardware === newHw
       );
       _dataActiveModel = still
         ? { model_name: still.model_name, quantization: still.quantization, hardware: still.hardware }

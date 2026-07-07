@@ -117,12 +117,34 @@ CREATE TABLE IF NOT EXISTS speed_measurements (
     raw_samples             TEXT
 );
 
+CREATE TABLE IF NOT EXISTS toolcall_runs (
+    run_id          TEXT PRIMARY KEY,
+    model_config_id INTEGER REFERENCES model_configs(id),
+    suite           TEXT NOT NULL DEFAULT 'bfcl-standard',
+    categories      TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS toolcall_results (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id               TEXT NOT NULL REFERENCES toolcall_runs(run_id),
+    category             TEXT NOT NULL,
+    tool_count           INTEGER NOT NULL,
+    context_bytes        INTEGER NOT NULL DEFAULT 0,
+    n_questions          INTEGER NOT NULL,
+    tool_accuracy        REAL,
+    arg_accuracy         REAL,
+    irrelevance_accuracy REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_recall_results_run   ON recall_results(run_id);
 CREATE INDEX IF NOT EXISTS idx_lmeval_results_run   ON lmeval_results(run_id);
 CREATE INDEX IF NOT EXISTS idx_speed_measurements_run ON speed_measurements(run_id);
+CREATE INDEX IF NOT EXISTS idx_toolcall_results_run ON toolcall_results(run_id);
 CREATE INDEX IF NOT EXISTS idx_recall_runs_model    ON recall_runs(model_config_id);
 CREATE INDEX IF NOT EXISTS idx_lmeval_runs_model    ON lmeval_runs(model_config_id);
 CREATE INDEX IF NOT EXISTS idx_speed_runs_model     ON speed_runs(model_config_id);
+CREATE INDEX IF NOT EXISTS idx_toolcall_runs_model  ON toolcall_runs(model_config_id);
 """
 
 
@@ -389,25 +411,32 @@ def query_recall_depth(
     config_name: str,
     quantization: str,
     corpus: str,
+    hardware: str | None = None,
 ) -> list[dict]:
     """Average per-function recall results across all runs for a given model+quant+corpus."""
+    where = ["mc.config_name = ?", "mc.quantization = ?", "rr.corpus = ?",
+             "res.start_line IS NOT NULL"]
+    params: list = [config_name, quantization, corpus]
+    if hardware is not None:
+        where.append("mc.hardware = ?")
+        params.append(hardware)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             res.function_name,
             res.start_line,
             AVG(res.primary_matched) AS primary_matched,
+            MAX(res.primary_total)   AS primary_total,
             AVG(res.latency_mean_s)  AS latency_mean_s,
             AVG(res.pass_rate)       AS pass_rate
         FROM recall_results res
         JOIN recall_runs rr ON rr.run_id = res.run_id
         JOIN model_configs mc ON mc.id = rr.model_config_id
-        WHERE mc.config_name = ? AND mc.quantization = ? AND rr.corpus = ?
-          AND res.start_line IS NOT NULL
+        WHERE {" AND ".join(where)}
         GROUP BY res.function_name
         ORDER BY res.start_line
         """,
-        (config_name, quantization, corpus),
+        params,
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -502,30 +531,6 @@ def query_lmeval_leaderboard(
         ORDER BY mc.config_name, res.task
         """,
         params,
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def query_quant_impact(conn: sqlite3.Connection, model_config: str) -> list[dict]:
-    """Return all metrics for a model across different quantizations."""
-    rows = conn.execute(
-        """
-        SELECT mc.model_name, mc.quantization, res.task AS metric_source, res.metric, res.value
-        FROM lmeval_runs lr
-        JOIN model_configs mc ON mc.id = lr.model_config_id
-        JOIN lmeval_results res ON res.run_id = lr.run_id
-        WHERE mc.model_name LIKE ?
-        UNION ALL
-        SELECT mc.model_name, mc.quantization, 'recall_' || rr.corpus AS metric_source,
-               'pass_rate', AVG(res2.pass_rate)
-        FROM recall_runs rr
-        JOIN model_configs mc ON mc.id = rr.model_config_id
-        JOIN recall_results res2 ON res2.run_id = rr.run_id
-        WHERE mc.model_name LIKE ?
-        GROUP BY mc.quantization, rr.corpus
-        ORDER BY mc.quantization
-        """,
-        (f"%{model_config}%", f"%{model_config}%"),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -628,6 +633,7 @@ def query_speed_curves(
             mc.config_name,
             mc.quantization,
             mc.runtime,
+            mc.architecture,
             mc.hardware,
             sm.context_tokens,
             AVG(sm.prefill_tps_mean)      AS prefill_tps_mean,
@@ -654,7 +660,12 @@ def query_speed_curves(
 
 def query_overview(conn: sqlite3.Connection) -> list[dict]:
     """One row per model_config with recall pass_rate, humaneval_plus, gsm8k,
-    ifeval, and gen_tps at ~8K context. For radar chart."""
+    ifeval, and gen_tps at ~8K context. For radar chart.
+
+    All metrics average across every run of the config, matching the
+    per-benchmark tab leaderboards. Tool-calling counts a correct refusal on
+    irrelevance questions as a win (irrelevance_accuracy substituted for the
+    not-applicable arg_accuracy)."""
     rows = conn.execute(
         """
         SELECT
@@ -668,33 +679,35 @@ def query_overview(conn: sqlite3.Connection) -> list[dict]:
              FROM recall_runs rr2
              JOIN recall_results res ON res.run_id = rr2.run_id
              WHERE rr2.model_config_id = mc.id) AS recall_pass_rate,
-            (SELECT res.value
+            (SELECT AVG(res.value)
              FROM lmeval_runs lr2
              JOIN lmeval_results res ON res.run_id = lr2.run_id
              WHERE lr2.model_config_id = mc.id
                AND res.task = 'humaneval_plus'
-               AND res.metric LIKE 'pass@1%'
-             ORDER BY lr2.created_at DESC LIMIT 1) AS humaneval_plus,
-            (SELECT res.value
+               AND res.metric LIKE 'pass@1%') AS humaneval_plus,
+            (SELECT AVG(res.value)
              FROM lmeval_runs lr2
              JOIN lmeval_results res ON res.run_id = lr2.run_id
              WHERE lr2.model_config_id = mc.id
                AND res.task = 'gsm8k_cot_zeroshot'
-               AND res.metric LIKE '%flexible%'
-             ORDER BY lr2.created_at DESC LIMIT 1) AS gsm8k,
-            (SELECT res.value
+               AND res.metric LIKE '%flexible%') AS gsm8k,
+            (SELECT AVG(res.value)
              FROM lmeval_runs lr2
              JOIN lmeval_results res ON res.run_id = lr2.run_id
              WHERE lr2.model_config_id = mc.id
                AND res.task = 'ifeval'
-               AND res.metric = 'prompt_level_strict_acc,none'
-             ORDER BY lr2.created_at DESC LIMIT 1) AS ifeval,
-            (SELECT COALESCE(sm.generation_tps_mean, sm.overall_tps_mean)
+               AND res.metric = 'prompt_level_strict_acc,none') AS ifeval,
+            (SELECT AVG(COALESCE(sm.generation_tps_mean, sm.overall_tps_mean))
              FROM speed_runs sr2
              JOIN speed_measurements sm ON sm.run_id = sr2.run_id
              WHERE sr2.model_config_id = mc.id
-               AND sm.context_tokens BETWEEN 6000 AND 10000
-             ORDER BY sr2.created_at DESC LIMIT 1) AS gen_tps_8k
+               AND sm.context_tokens BETWEEN 6000 AND 10000) AS gen_tps_8k,
+            (SELECT AVG(CASE WHEN tr.category = 'irrelevance'
+                             THEN tr.irrelevance_accuracy
+                             ELSE tr.arg_accuracy END)
+             FROM toolcall_runs tcr2
+             JOIN toolcall_results tr ON tr.run_id = tcr2.run_id
+             WHERE tcr2.model_config_id = mc.id) AS toolcall_accuracy
         FROM model_configs mc
         ORDER BY mc.config_name
         """
@@ -719,6 +732,7 @@ def query_filter_options(conn: sqlite3.Connection) -> dict:
                 SELECT model_config_id FROM recall_runs
                 UNION ALL SELECT model_config_id FROM lmeval_runs
                 UNION ALL SELECT model_config_id FROM speed_runs
+                UNION ALL SELECT model_config_id FROM toolcall_runs WHERE model_config_id IS NOT NULL
             ) runs ON runs.model_config_id = mc.id
             GROUP BY mc.model_name, mc.quantization, mc.hardware
             ORDER BY mc.model_name, mc.quantization, mc.hardware
@@ -759,6 +773,13 @@ def query_run_detail(conn: sqlite3.Connection, run_type: str, run_id: str) -> li
                FROM speed_measurements WHERE run_id = ? ORDER BY context_tokens""",
             (run_id,),
         ).fetchall()
+    elif run_type == "toolcall":
+        rows = conn.execute(
+            """SELECT category, tool_count, context_bytes, n_questions,
+                      tool_accuracy, arg_accuracy, irrelevance_accuracy
+               FROM toolcall_results WHERE run_id = ? ORDER BY category, tool_count""",
+            (run_id,),
+        ).fetchall()
     else:
         rows = []
     return [dict(r) for r in rows]
@@ -778,14 +799,182 @@ def delete_runs(conn: sqlite3.Connection, runs: list[dict]) -> None:
         elif run_type == "speed":
             conn.execute("DELETE FROM speed_measurements WHERE run_id = ?", (run_id,))
             conn.execute("DELETE FROM speed_runs WHERE run_id = ?", (run_id,))
+        elif run_type == "toolcall":
+            conn.execute("DELETE FROM toolcall_results WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM toolcall_runs WHERE run_id = ?", (run_id,))
+    _prune_orphan_model_configs(conn)
+    conn.commit()
+
+
+def _prune_orphan_model_configs(conn: sqlite3.Connection) -> None:
+    """Delete model_configs no run references.
+
+    toolcall_runs.model_config_id is nullable — a NULL inside a NOT IN
+    subquery makes the predicate never-true, so NULLs must be excluded."""
     conn.execute("""
         DELETE FROM model_configs WHERE id NOT IN (
             SELECT model_config_id FROM recall_runs
             UNION SELECT model_config_id FROM lmeval_runs
             UNION SELECT model_config_id FROM speed_runs
+            UNION SELECT model_config_id FROM toolcall_runs
+                  WHERE model_config_id IS NOT NULL
         )
     """)
+
+
+# ---------------------------------------------------------------------------
+# Tool-calling benchmark
+# ---------------------------------------------------------------------------
+
+def insert_toolcall_run(
+    conn: sqlite3.Connection,
+    model_config_id: int | None,
+    suite: str,
+    categories: list[str],
+    run_id: str | None = None,
+) -> str:
+    run_id = run_id or _new_run_id()
+    conn.execute(
+        """
+        INSERT INTO toolcall_runs (run_id, model_config_id, suite, categories, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (run_id, model_config_id, suite, json.dumps(categories), _now()),
+    )
     conn.commit()
+    return run_id
+
+
+def insert_toolcall_result(
+    conn: sqlite3.Connection,
+    run_id: str,
+    category: str,
+    tool_count: int,
+    context_bytes: int,
+    n_questions: int,
+    tool_accuracy: float,
+    arg_accuracy: float,
+    irrelevance_accuracy: float | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO toolcall_results
+            (run_id, category, tool_count, context_bytes, n_questions,
+             tool_accuracy, arg_accuracy, irrelevance_accuracy)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, category, tool_count, context_bytes, n_questions,
+         tool_accuracy, arg_accuracy, irrelevance_accuracy),
+    )
+    conn.commit()
+
+
+def query_toolcall_heatmap(
+    conn: sqlite3.Connection,
+    model_config: str | None = None,
+    quantization: str | None = None,
+    category: str | None = None,
+) -> list[dict]:
+    """Return rows for the heatmap: one row per (model, tool_count, context_bytes) cell.
+
+    `accuracy` counts a correct refusal on irrelevance questions as a win
+    (irrelevance has no correct call, so its arg_accuracy is 0 by construction
+    and must not be averaged in raw). Same math as query_overview."""
+    where = ["1=1"]
+    params: list = []
+    if model_config:
+        where.append("mc.config_name = ?")
+        params.append(model_config)
+    if quantization:
+        where.append("mc.quantization = ?")
+        params.append(quantization)
+    if category:
+        where.append("tr.category = ?")
+        params.append(category)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            mc.model_name,
+            mc.config_name,
+            mc.quantization,
+            mc.runtime,
+            mc.architecture,
+            mc.hardware,
+            tr.tool_count,
+            tr.context_bytes,
+            AVG(CASE WHEN tr.category = 'irrelevance'
+                     THEN tr.irrelevance_accuracy
+                     ELSE tr.arg_accuracy END) AS accuracy,
+            AVG(tr.tool_accuracy)        AS tool_accuracy,
+            AVG(tr.arg_accuracy)         AS arg_accuracy,
+            AVG(tr.irrelevance_accuracy) AS irrelevance_accuracy,
+            SUM(tr.n_questions)          AS n_questions
+        FROM toolcall_results tr
+        JOIN toolcall_runs tcr ON tcr.run_id = tr.run_id
+        JOIN model_configs mc  ON mc.id = tcr.model_config_id
+        WHERE {" AND ".join(where)}
+        GROUP BY mc.id, tr.tool_count, tr.context_bytes
+        ORDER BY mc.config_name, tr.tool_count, tr.context_bytes
+        """,
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def query_toolcall_breakdown(
+    conn: sqlite3.Connection,
+    model_config: str | None = None,
+    quantization: str | None = None,
+    tool_count: int | None = None,
+    context_bytes: int | None = None,
+    hardware: str | None = None,
+) -> list[dict]:
+    """Per-category accuracy for a specific (tool_count, context_bytes) cell."""
+    where = ["1=1"]
+    params: list = []
+    if model_config:
+        where.append("mc.config_name = ?")
+        params.append(model_config)
+    if quantization:
+        where.append("mc.quantization = ?")
+        params.append(quantization)
+    if hardware is not None:
+        where.append("mc.hardware = ?")
+        params.append(hardware)
+    if tool_count is not None:
+        where.append("tr.tool_count = ?")
+        params.append(tool_count)
+    if context_bytes is not None:
+        where.append("tr.context_bytes = ?")
+        params.append(context_bytes)
+
+    rows = conn.execute(
+        f"""
+        SELECT
+            mc.model_name,
+            mc.config_name,
+            mc.quantization,
+            mc.runtime,
+            mc.architecture,
+            mc.hardware,
+            tr.category,
+            tr.tool_count,
+            tr.context_bytes,
+            AVG(tr.tool_accuracy)        AS tool_accuracy,
+            AVG(tr.arg_accuracy)         AS arg_accuracy,
+            AVG(tr.irrelevance_accuracy) AS irrelevance_accuracy,
+            SUM(tr.n_questions)          AS n_questions
+        FROM toolcall_results tr
+        JOIN toolcall_runs tcr ON tcr.run_id = tr.run_id
+        JOIN model_configs mc  ON mc.id = tcr.model_config_id
+        WHERE {" AND ".join(where)}
+        GROUP BY mc.id, tr.category
+        ORDER BY mc.config_name, tr.category
+        """,
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def patch_run_meta(
@@ -795,7 +984,8 @@ def patch_run_meta(
     hardware: str | None,
 ) -> None:
     """Re-assign runs to a new (quantization, hardware) key; create model_config if needed."""
-    _RUN_TABLE = {"recall": "recall_runs", "lmeval": "lmeval_runs", "speed": "speed_runs"}
+    _RUN_TABLE = {"recall": "recall_runs", "lmeval": "lmeval_runs",
+                  "speed": "speed_runs", "toolcall": "toolcall_runs"}
     for run in runs:
         table = _RUN_TABLE.get(run["type"])
         if not table:
@@ -823,11 +1013,5 @@ def patch_run_meta(
             (mc["model_name"], mc["runtime"], new_quant, new_hw),
         ).fetchone()["id"]
         conn.execute(f"UPDATE {table} SET model_config_id=? WHERE run_id=?", (new_id, run["run_id"]))
-    conn.execute("""
-        DELETE FROM model_configs WHERE id NOT IN (
-            SELECT model_config_id FROM recall_runs
-            UNION SELECT model_config_id FROM lmeval_runs
-            UNION SELECT model_config_id FROM speed_runs
-        )
-    """)
+    _prune_orphan_model_configs(conn)
     conn.commit()

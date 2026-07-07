@@ -62,6 +62,10 @@ class RunRequest(BaseModel):
     suites: list[str]
     quantization: str | None = None
     architecture: str | None = None
+    # Tool-calling matrix knobs (typed as int lists → safe to interpolate)
+    tool_counts: list[int] | None = None
+    context_padding_kb: list[int] | None = None
+    toolcall_limit: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -129,22 +133,35 @@ async def start_run(body: RunRequest, request: Request) -> dict:
     all_suites = {"recall", "coding", "reasoning", "speed"}
     suites = set(body.suites)
 
-    if all_suites <= suites:
-        # All four — use run-all
+    if all_suites <= suites and "toolcall" not in suites:
+        # All four core suites — use run-all
         cmd_str = f"{sys.executable} bench.py run-all --model {model_name} --corpus {body.corpus}"
     else:
         parts: list[str] = []
         if "recall" in suites:
             parts.append(f"{sys.executable} bench.py recall --model {model_name} --corpus {body.corpus}")
         if "coding" in suites:
-            parts.append(f"{sys.executable} bench.py lmeval --suite all --model {model_name}")
+            parts.append(f"{sys.executable} bench.py lmeval --suite coding-standard --model {model_name}")
         if "reasoning" in suites:
             parts.append(f"{sys.executable} bench.py lmeval --suite reasoning --model {model_name}")
         if "speed" in suites:
             parts.append(f"{sys.executable} bench.py speed --model {model_name}")
+        if "toolcall" in suites:
+            tc_cmd = f"{sys.executable} bench.py toolcall --model {model_name}"
+            # These are int-typed by pydantic, so int() coercion keeps them
+            # shell-safe even though the command is run through a shell.
+            if body.tool_counts:
+                tc_cmd += " --tool-counts " + " ".join(str(int(n)) for n in body.tool_counts)
+            if body.context_padding_kb:
+                tc_cmd += " --context-padding " + " ".join(str(int(k)) for k in body.context_padding_kb)
+            if body.toolcall_limit:
+                tc_cmd += f" --limit {int(body.toolcall_limit)}"
+            parts.append(tc_cmd)
         if not parts:
             raise HTTPException(status_code=400, detail="No valid suites specified")
-        cmd_str = " && ".join(parts)
+        # ';' not '&&' — recall exits nonzero when any function fails (normal
+        # for real models) and must not abort the remaining suites.
+        cmd_str = " ; ".join(parts)
 
     process = await asyncio.create_subprocess_shell(
         cmd_str,
@@ -174,6 +191,18 @@ async def start_run(body: RunRequest, request: Request) -> dict:
 @router.get("/active")
 def get_active_runs(request: Request) -> list[dict]:
     run_state = _run_state(request)
+    # Prune finished runs older than 6h so logs don't accumulate forever
+    cutoff = datetime.now(timezone.utc).timestamp() - 6 * 3600
+    for rid in list(run_state):
+        info = run_state[rid]
+        if info["status"] == "running":
+            continue
+        try:
+            started = datetime.fromisoformat(info["started_at"]).timestamp()
+        except ValueError:
+            continue
+        if started < cutoff:
+            del run_state[rid]
     return [
         {
             "run_id": run_id,

@@ -152,7 +152,9 @@ def _build_payload(client_cfg, model_cfg, messages: list[dict]) -> dict:
         for i in range(len(processed_messages) - 1, -1, -1):
             if processed_messages[i]["role"] == "user":
                 processed_messages[i] = dict(processed_messages[i])
-                if not processed_messages[i]["content"].endswith("/no_think"):
+                # rstrip: the recall prompt template ends with "/no_think\n" —
+                # don't append a second marker just because of the newline
+                if not processed_messages[i]["content"].rstrip().endswith("/no_think"):
                     processed_messages[i]["content"] += " /no_think"
                 break
 

@@ -16,11 +16,12 @@ from bench.db import (
     query_filter_options,
     query_lmeval_leaderboard,
     query_overview,
-    query_quant_impact,
     query_recall_depth,
     query_recall_leaderboard,
     query_run_detail,
     query_speed_curves,
+    query_toolcall_breakdown,
+    query_toolcall_heatmap,
 )
 
 
@@ -41,6 +42,7 @@ SELECT MAX(ts) AS ts FROM (
     SELECT MAX(created_at) AS ts FROM recall_runs
     UNION ALL SELECT MAX(created_at) FROM lmeval_runs
     UNION ALL SELECT MAX(created_at) FROM speed_runs
+    UNION ALL SELECT MAX(created_at) FROM toolcall_runs
 )
 """
 
@@ -117,10 +119,11 @@ def get_recall_depth(
     config_name: str,
     quantization: str,
     corpus: str,
+    hardware: str | None = None,
 ) -> list[dict[str, Any]]:
     conn = _db(request)
     try:
-        return query_recall_depth(conn, config_name, quantization, corpus)
+        return query_recall_depth(conn, config_name, quantization, corpus, hardware=hardware)
     finally:
         conn.close()
 
@@ -142,57 +145,6 @@ def get_lmeval_leaderboard(
         return query_lmeval_leaderboard(
             conn, suite=suite, task=task, runtime=runtime, quantization=quantization
         )
-    finally:
-        conn.close()
-
-
-@router.get("/lmeval/multilang")
-def get_lmeval_multilang(
-    request: Request,
-    runtime: str | None = None,
-    quantization: str | None = None,
-) -> list[dict[str, Any]]:
-    """Multi-language heatmap data: one row per model with a column per language."""
-    conn = _db(request)
-    try:
-        # Fetch all multilang results (MultiPL-E tasks)
-        multilang_tasks = ["multiple_js", "multiple_ts", "multiple_java",
-                           "multiple_cpp", "multiple_rs", "multiple_go", "multiple_py"]
-        all_rows = query_lmeval_leaderboard(
-            conn, suite="coding-multilang", runtime=runtime, quantization=quantization
-        )
-        # Pivot: group by (config_name, quantization) → dict of lang → score
-        pivot: dict[tuple, dict] = {}
-        for row in all_rows:
-            key = (row["model_name"], row.get("quantization"))
-            if key not in pivot:
-                pivot[key] = {
-                    "model_name": row["model_name"],
-                    "config_name": row["config_name"],
-                    "quantization": row.get("quantization"),
-                    "runtime": row.get("runtime"),
-                }
-            task = row["task"]
-            lang = task.replace("multiple_", "")  # "multiple_js" → "js"
-            if task in multilang_tasks and "pass@1" in row.get("metric", ""):
-                pivot[key][lang] = row["value"]
-        return list(pivot.values())
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Quant impact
-# ---------------------------------------------------------------------------
-
-@router.get("/quant-impact")
-def get_quant_impact(
-    request: Request,
-    model_config: str,
-) -> list[dict[str, Any]]:
-    conn = _db(request)
-    try:
-        return query_quant_impact(conn, model_config)
     finally:
         conn.close()
 
@@ -221,13 +173,19 @@ def get_speed_comparison(
     runtime: str | None = None,
     quantization: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Speed bar chart at a fixed context size."""
+    """Speed bar chart at a fixed context size.
+
+    Only measurements within ±25% of the requested size qualify (same window
+    as the Overview radar's gen_tps_8k) — otherwise a model profiled only at
+    e.g. 1K would silently show its 1K speed labeled "~8K"."""
     conn = _db(request)
     try:
         all_curves = query_speed_curves(conn, runtime=runtime, quantization=quantization)
-        # Find closest available context size for each model
+        lo, hi = context_tokens * 0.75, context_tokens * 1.25
         result = {}
         for row in all_curves:
+            if not (lo <= row["context_tokens"] <= hi):
+                continue
             key = (row["model_name"], row.get("quantization"), row.get("hardware", ""))
             current_dist = abs(row["context_tokens"] - context_tokens)
             if key not in result or abs(result[key]["context_tokens"] - context_tokens) > current_dist:
@@ -301,7 +259,17 @@ def get_runs(
                 (*wp, page_size, offset),
             ).fetchall()
             return [dict(r) for r in rows]
-        # type is None — merge all three tables
+        if type == "toolcall":
+            rows = conn.execute(
+                f"""SELECT tcr.run_id, 'toolcall' AS type, mc.config_name, mc.model_name,
+                           mc.quantization, mc.hardware, tcr.suite AS task_suite, tcr.created_at
+                    FROM toolcall_runs tcr JOIN model_configs mc ON mc.id=tcr.model_config_id
+                    WHERE 1=1 {wsql}
+                    ORDER BY tcr.created_at DESC LIMIT ? OFFSET ?""",
+                (*wp, page_size, offset),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        # type is None — merge all four tables
         rows = conn.execute(
             f"""SELECT * FROM (
                     SELECT rr.run_id, 'recall' AS type, mc.config_name, mc.model_name,
@@ -321,8 +289,14 @@ def get_runs(
                            NULL, NULL, sr.created_at, NULL
                     FROM speed_runs sr JOIN model_configs mc ON mc.id=sr.model_config_id
                     WHERE 1=1 {wsql}
+                    UNION ALL
+                    SELECT tcr.run_id, 'toolcall', mc.config_name, mc.model_name,
+                           mc.quantization, mc.hardware,
+                           NULL, tcr.suite, tcr.created_at, NULL
+                    FROM toolcall_runs tcr JOIN model_configs mc ON mc.id=tcr.model_config_id
+                    WHERE 1=1 {wsql}
                 ) ORDER BY created_at DESC LIMIT ? OFFSET ?""",
-            (*wp, *wp, *wp, page_size, offset),
+            (*wp, *wp, *wp, *wp, page_size, offset),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -356,6 +330,45 @@ def bulk_patch_run_meta(request: Request, body: _BulkMetaBody) -> dict[str, Any]
         from bench.db import query_filter_options
         opts = query_filter_options(conn)
         return {"ok": True, "model_quants": opts["model_quants"]}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool-calling benchmark
+# ---------------------------------------------------------------------------
+
+@router.get("/toolcall/heatmap")
+def get_toolcall_heatmap(
+    request: Request,
+    model_config: str | None = None,
+    quantization: str | None = None,
+    category: str | None = None,
+) -> list[dict[str, Any]]:
+    conn = _db(request)
+    try:
+        return query_toolcall_heatmap(conn, model_config=model_config,
+                                      quantization=quantization, category=category)
+    finally:
+        conn.close()
+
+
+@router.get("/toolcall/breakdown")
+def get_toolcall_breakdown(
+    request: Request,
+    model_config: str | None = None,
+    quantization: str | None = None,
+    tool_count: int | None = None,
+    context_bytes: int | None = None,
+    hardware: str | None = None,
+) -> list[dict[str, Any]]:
+    conn = _db(request)
+    try:
+        return query_toolcall_breakdown(conn, model_config=model_config,
+                                        quantization=quantization,
+                                        tool_count=tool_count,
+                                        context_bytes=context_bytes,
+                                        hardware=hardware)
     finally:
         conn.close()
 

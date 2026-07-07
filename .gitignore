@@ -23,6 +23,9 @@ venv/
 results/
 *.db
 
+# Downloaded benchmark data — fetched on demand via `bench.py toolcall --download-data`
+fixtures/bfcl/
+
 # Playwright MCP session files
 .playwright-mcp/
 

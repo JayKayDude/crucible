@@ -61,3 +61,56 @@ def chat_complete(cfg: ClientConfig, system: str | None, user: str) -> str:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
         data = r.json()
     return data["choices"][0]["message"]["content"]
+
+
+def chat_complete_tools(
+    cfg: ClientConfig,
+    tools: list[dict],
+    messages: list[dict],
+    model_cfg=None,
+) -> tuple[list[dict] | None, str | None]:
+    """Call the model with tool schemas. Returns (tool_calls, text_content).
+
+    tool_calls is a list of {"name": str, "arguments": dict} dicts, or None if
+    the model produced a plain text response (e.g. no tool call, or irrelevance).
+    Models that don't support tool calling will raise or return a text response —
+    both cases result in tool_calls=None, scoring as 0.
+
+    Passing model_cfg applies the same reasoning-suppression stack as the
+    recall/speed suites (suppress_thinking, prefill_no_think, stop) so results
+    stay comparable across benchmarks.
+    """
+    payload = {
+        **_build_payload(cfg, model_cfg, messages),
+        "stream": False,
+        "tools": [{"type": "function", "function": t} for t in tools],
+        "tool_choice": "auto",
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    url = f"{cfg.base_url.rstrip('/')}/v1/chat/completions"
+    with httpx.Client(timeout=cfg.timeout) as client:
+        r = client.post(url, json=payload, headers=headers)
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
+        data = r.json()
+
+    msg = data["choices"][0]["message"]
+    raw_calls = msg.get("tool_calls") or []
+    if not raw_calls:
+        return None, msg.get("content")
+
+    parsed: list[dict] = []
+    for tc in raw_calls:
+        fn = tc.get("function", {})
+        name = fn.get("name", "")
+        raw_args = fn.get("arguments", "{}")
+        try:
+            import json as _json
+            args = _json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except Exception:
+            args = {}
+        parsed.append({"name": name, "arguments": args})
+    return parsed, msg.get("content")

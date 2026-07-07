@@ -376,6 +376,7 @@ select {
 .run-btn:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
 .me-delete-btn { color: #f87171 !important; }
 .run-note { font-size: 0.78rem; color: #f59e0b; }
+.run-corpus-size { font-size: 0.76rem; color: #6b7280; }
 .suite-toggle {
   display: flex;
   align-items: center;
@@ -384,6 +385,44 @@ select {
   color: #e0e0e0;
   cursor: pointer;
 }
+
+/* ── Tool Calling run options ── */
+.toolcall-options {
+  background: #14161f;
+  border: 1px solid #2a2d3a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tc-opt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.tc-opt-row > label { font-size: 0.78rem; color: #9ca3af; min-width: 132px; }
+.tc-chip-group { display: flex; gap: 6px; flex-wrap: wrap; }
+.tc-chip {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #9ca3af;
+  padding: 3px 12px;
+  border-radius: 14px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.tc-chip:hover { color: #e0e0e0; border-color: #4b5563; }
+.tc-chip.active { color: #c4b5fd; border-color: #6366f1; background: #1e1b4b; }
+.tc-chip-sub { font-size: 0.68rem; opacity: 0.7; }
+.tc-limit-input {
+  background: #252836;
+  border: 1px solid #374151;
+  color: #e0e0e0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  width: 72px;
+}
+.tc-estimate { font-size: 0.76rem; color: #6b7280; }
+.tc-estimate.warn { color: #f59e0b; }
 
 /* ── Run cards ── */
 #run-cards { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
@@ -469,6 +508,7 @@ select {
 .custom-files-empty { font-size: 0.76rem; color: #4b5563; font-style: italic; }
 .custom-file-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #13151f; border-radius: 6px; }
 .custom-file-name { flex: 1; font-size: 0.8rem; color: #d1d5db; font-family: "SF Mono", "Fira Code", monospace; }
+.custom-file-size { font-size: 0.72rem; color: #6b7280; white-space: nowrap; }
 .custom-file-delete { background: none; border: none; color: #6b7280; cursor: pointer; font-size: 0.75rem; padding: 2px 4px; border-radius: 4px; transition: color 0.15s; }
 .custom-file-delete:hover { color: #ef4444; }
 
@@ -591,7 +631,8 @@ select {
 .data-type-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 500; white-space: nowrap; }
 .data-type-badge.recall { background: #064e3b; color: #34d399; }
 .data-type-badge.lmeval { background: #1e1b4b; color: #a5b4fc; }
-.data-type-badge.speed  { background: #422006; color: #fb923c; }
+.data-type-badge.speed    { background: #422006; color: #fb923c; }
+.data-type-badge.toolcall { background: #1a2744; color: #60a5fa; }
 .data-run-detail-str { font-size: 0.72rem; color: #6b7280; white-space: nowrap; }
 
 .data-detail-row { overflow: hidden; max-height: 0; transition: max-height 0.25s ease; background: #0f1117; border-bottom: 1px solid #1e2130; }

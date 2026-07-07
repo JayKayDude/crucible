@@ -290,6 +290,41 @@ def cmd_speed(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- toolcall -------------------------------------------------------------
+
+
+def cmd_toolcall(args: argparse.Namespace) -> int:
+    from bench.config import load_model
+    from bench.toolcall_runner import download_bfcl_data, run_toolcall_benchmark
+
+    db_path = Path(getattr(args, "db", "results/benchmark.db"))
+    fixtures_dir = REPO_ROOT / "fixtures"
+
+    if args.download_data:
+        print("Downloading BFCL fixtures ...", flush=True)
+        download_bfcl_data(fixtures_dir)
+        if not getattr(args, "model", None):
+            return 0
+
+    if not args.model:
+        raise SystemExit("error: --model is required (or use --download-data)")
+
+    model, _ = load_model(args.model)
+    tool_counts = args.tool_counts if args.tool_counts else None
+    pad_sizes = args.context_padding if args.context_padding else None
+
+    run_toolcall_benchmark(
+        cfg=model,
+        fixtures_dir=fixtures_dir,
+        db_path=db_path,
+        tool_counts=tool_counts,
+        context_padding_kb=pad_sizes,
+        limit=args.limit,
+        full=args.full,
+    )
+    return 0
+
+
 # --- import-lmeval --------------------------------------------------------
 
 
@@ -325,7 +360,7 @@ def cmd_run_all(args: argparse.Namespace) -> int:
     db_path = Path(getattr(args, "db", "results/benchmark.db"))
 
     # 1. Recall
-    print("\n=== Step 1/5: Recall benchmark ===")
+    print("\n=== Step 1/4: Recall benchmark ===")
     args_copy = type("A", (), {
         "model": args.model,
         "corpus": args.corpus,
@@ -525,6 +560,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="SQLite DB path (default: results/benchmark.db)",
     )
     p_sp.set_defaults(func=cmd_speed)
+
+    # --- toolcall -----------------------------------------------------------
+    p_tc = sub.add_parser(
+        "toolcall",
+        help="tool-calling benchmark (BFCL dataset, tests N tools × context size matrix)",
+    )
+    p_tc.add_argument(
+        "--model", default=None,
+        help="model config name or raw identifier (optional with --download-data)",
+    )
+    p_tc.add_argument(
+        "--tool-counts", nargs="+", type=int, default=None, metavar="N",
+        help="tool counts to test (default: 5 10 25 50)",
+    )
+    p_tc.add_argument(
+        "--context-padding", nargs="+", type=int, default=None, metavar="KB",
+        help="context padding sizes in KB (default: 0 only; --full for all)",
+    )
+    p_tc.add_argument(
+        "--limit", type=int, default=50,
+        help="max questions per category (default: 50)",
+    )
+    p_tc.add_argument(
+        "--full", action="store_true",
+        help="run full matrix: all tool counts × all context sizes (0/8/32/64 KB)",
+    )
+    p_tc.add_argument(
+        "--download-data", action="store_true",
+        help="download BFCL fixtures to fixtures/bfcl/ and exit (or continue if --model given)",
+    )
+    p_tc.add_argument(
+        "--db", default="results/benchmark.db",
+        help="SQLite DB path (default: results/benchmark.db)",
+    )
+    p_tc.set_defaults(func=cmd_toolcall)
 
     # --- import-lmeval ------------------------------------------------------
     p_imp = sub.add_parser(
