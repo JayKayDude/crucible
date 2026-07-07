@@ -58,9 +58,12 @@ def profile_speed(
     print(f"{'Context':>10}  {'Prefill t/s':>12}  {'Gen t/s':>10}  {'Overall t/s':>12}  {'TTFT':>8}")
     print("-" * 60)
 
+    from bench.progress import emit as emit_progress
+
     measurements: list[dict] = []
 
-    for ctx_size in sizes:
+    for idx, ctx_size in enumerate(sizes, 1):
+        emit_progress("speed", idx, len(sizes), f"{ctx_size:,} ctx")
         prompt = _build_prompt_of_size(fixture_text, ctx_size)
         actual_tokens = int(len(prompt) / _CHARS_PER_TOKEN_EST)
 

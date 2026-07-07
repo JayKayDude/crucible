@@ -383,7 +383,11 @@ def run_toolcall_benchmark(
     insert_toolcall_run(conn, mc_id, "bfcl-v4", list(all_items.keys()), run_id)
     conn.close()
 
+    from bench.progress import emit as emit_progress
+
     rng = random.Random(seed)
+    total_cells = len(all_items) * len(t_counts) * len(pad_sizes)
+    cell_idx = 0
 
     for cat, items in all_items.items():
         for tool_count in t_counts:
@@ -391,8 +395,10 @@ def run_toolcall_benchmark(
                 pad_bytes = pad_kb * 1024
                 filler = _make_filler(pad_bytes)
 
+                cell_idx += 1
                 n_tool_match = n_arg_match = n_no_call = n_scored = n_errors = 0
                 label = f"{cat} | N={tool_count} | pad={pad_kb}KB"
+                emit_progress("toolcall", cell_idx, total_cells, label)
                 print(f"[{label}] {len(items)} questions ...", flush=True)
 
                 for item in items:

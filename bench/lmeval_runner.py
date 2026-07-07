@@ -72,8 +72,13 @@ def run_lmeval_suite(
     """
     from bench.db import get_db, upsert_model_config, insert_lmeval_run, insert_lmeval_result
     from bench.timing import detect_runtime
+    from bench.progress import emit as emit_progress
 
     run_id = str(uuid.uuid4())
+
+    # Dashboard phase name (matches the Run-tab suite checkboxes)
+    phase = {"coding-standard": "coding", "coding-multilang": "coding",
+             "reasoning": "reasoning"}.get(suite_cfg.name, suite_cfg.name)
 
     # Determine --model flag from runtime
     runtime = detect_runtime(
@@ -146,8 +151,10 @@ def run_lmeval_suite(
 
         all_task_results: dict = {}
         lmeval_version: str | None = None
+        total_groups = len(groups)
 
-        for grp_limit, grp_tasks in groups.items():
+        for grp_idx, (grp_limit, grp_tasks) in enumerate(groups.items()):
+            emit_progress(phase, grp_idx, total_groups, ", ".join(grp_tasks))
             # CLI --limit overrides per-task TOML limits (useful for quick tests)
             effective_limit = limit if limit is not None else grp_limit
             # Short readable suffix for output dir (strip common suffixes)
@@ -173,6 +180,7 @@ def run_lmeval_suite(
             all_task_results.update(grp_data.get("results", {}))
             if lmeval_version is None:
                 lmeval_version = grp_data.get("versions", {}).get("lm_eval")
+            emit_progress(phase, grp_idx + 1, total_groups, ", ".join(grp_tasks))
 
         # Record the first group's output dir as the canonical path
         first_suffix = "_".join(
@@ -191,11 +199,13 @@ def run_lmeval_suite(
         print(f"Output: {run_output_dir}")
         print("-" * 60)
 
+        emit_progress(phase, 0, 1, ", ".join(suite_cfg.tasks))
         cmd = _build_cmd(
             lm_eval_bin, lmeval_model_flag, model_args_parts,
             suite_cfg.tasks, suite_cfg, run_output_dir, limit, max_gen_toks,
         )
         _exec_subprocess(cmd, env)
+        emit_progress(phase, 1, 1, ", ".join(suite_cfg.tasks))
 
         results_data = _parse_lmeval_output(run_output_dir)
         all_task_results = results_data.get("results", {})

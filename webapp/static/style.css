@@ -487,6 +487,38 @@ select {
 }
 .run-status-dot.done { background: #10b981; }
 .run-status-dot.error, .run-status-dot.cancelled { background: #ef4444; }
+/* ── Run progress ── */
+.run-progress { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.run-phases { display: flex; flex-wrap: wrap; gap: 6px; }
+.run-phase {
+  font-size: 0.7rem;
+  padding: 2px 9px;
+  border-radius: 10px;
+  border: 1px solid #374151;
+  color: #6b7280;
+  white-space: nowrap;
+}
+.run-phase::before { content: "○ "; }
+.run-phase.running { color: #c4b5fd; border-color: #6366f1; background: #1e1b4b; }
+.run-phase.running::before { content: "◐ "; }
+.run-phase.done { color: #34d399; border-color: #065f46; }
+.run-phase.done::before { content: "✓ "; }
+.run-phase.error, .run-phase.cancelled { color: #f87171; border-color: #7f1d1d; }
+.run-phase.error::before, .run-phase.cancelled::before { content: "✕ "; }
+.run-bar-row { display: flex; align-items: center; gap: 10px; }
+.run-bar { flex: 1; height: 6px; background: #252836; border-radius: 3px; overflow: hidden; }
+.run-bar-fill { height: 100%; width: 0%; background: #6366f1; border-radius: 3px; transition: width 0.3s ease; }
+.run-eta { font-size: 0.72rem; color: #9ca3af; white-space: nowrap; min-width: 60px; text-align: right; }
+.run-activity { font-size: 0.74rem; color: #9ca3af; font-family: "SF Mono", "Fira Code", monospace; }
+.run-log-toggle {
+  padding: 6px 14px;
+  font-size: 0.72rem;
+  color: #6b7280;
+  cursor: pointer;
+  border-top: 1px solid #2a2d3a;
+  user-select: none;
+}
+.run-log-toggle:hover { color: #e0e0e0; }
 .run-log {
   padding: 10px 14px;
   overflow-y: auto;

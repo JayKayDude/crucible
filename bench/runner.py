@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .client import ClientConfig, chat_complete
 from .extract import Source, extract, load_source_glob, stratified_sample
+from .progress import emit as emit_progress
 from .report import render_function, render_summary
 from .scorer import FunctionScore, score
 from .timing import complete_with_timing, warmup as kv_warmup, TimingResult
@@ -280,6 +281,7 @@ def run_benchmark(
         prompt = _build_prompt(t, text, multi_file, suppress_thinking)
         system_msg = None
         user_msg = prompt
+        emit_progress("recall", i, len(chosen), t.name)
         print(
             f"\n[{i}/{len(chosen)}] `{t.name}` — prompt {len(prompt):,} chars, waiting on model...",
             flush=True,

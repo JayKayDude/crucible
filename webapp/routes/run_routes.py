@@ -72,6 +72,29 @@ class RunRequest(BaseModel):
 # Background task: stream subprocess output into run_state
 # ---------------------------------------------------------------------------
 
+# Contract with bench/progress.py — see that module.
+_PROGRESS_PREFIX = "@@PROGRESS "
+# Canonical suite order for the phase tracker.
+_CANON_PHASES = ["recall", "coding", "reasoning", "speed", "toolcall"]
+
+
+def _record_progress(state: dict, payload: str) -> None:
+    """Merge a parsed @@PROGRESS marker into the run's per-phase progress."""
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        return
+    phase = data.get("phase")
+    if not phase:
+        return
+    state.setdefault("progress", {})[phase] = {
+        "done":  data.get("done", 0),
+        "total": data.get("total", 0),
+        "label": data.get("label", ""),
+    }
+    state["progress_seq"] = state.get("progress_seq", 0) + 1
+
+
 async def _stream_process(
     run_id: str,
     process: asyncio.subprocess.Process,
@@ -85,6 +108,9 @@ async def _stream_process(
             if not line_bytes:
                 break
             line = line_bytes.decode("utf-8", errors="replace").rstrip("\n")
+            if line.startswith(_PROGRESS_PREFIX):
+                _record_progress(run_state[run_id], line[len(_PROGRESS_PREFIX):])
+                continue  # progress markers are a side channel, not raw log
             run_state[run_id]["logs"].append(line)
 
         await process.wait()
@@ -163,19 +189,26 @@ async def start_run(body: RunRequest, request: Request) -> dict:
         # for real models) and must not abort the remaining suites.
         cmd_str = " ; ".join(parts)
 
+    # BENCH_PROGRESS switches on the @@PROGRESS markers the runners emit.
+    env = {**os.environ, "BENCH_PROGRESS": "1"}
     process = await asyncio.create_subprocess_shell(
         cmd_str,
         stdout=PIPE,
         stderr=STDOUT,
         cwd=str(_PROJECT_ROOT),
+        env=env,
     )
 
+    phases = [p for p in _CANON_PHASES if p in suites]
     run_state[run_id] = {
         "process": process,
         "logs": [],
         "status": "running",
         "cmd_summary": cmd_str,
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "phases": phases,
+        "progress": {},
+        "progress_seq": 0,
     }
 
     # Fire-and-forget background task
@@ -209,6 +242,8 @@ def get_active_runs(request: Request) -> list[dict]:
             "status": info["status"],
             "cmd_summary": info["cmd_summary"],
             "started_at": info["started_at"],
+            "phases": info.get("phases", []),
+            "progress": info.get("progress", {}),
         }
         for run_id, info in run_state.items()
     ]
@@ -228,7 +263,13 @@ async def stream_logs(run_id: str, request: Request):
     async def generator():
         try:
             sent_index = 0
+            sent_progress_seq = -1
             last_heartbeat = asyncio.get_event_loop().time()
+
+            # Send the phase list up front so pending phases render immediately.
+            info0 = run_state.get(run_id)
+            if info0 is not None:
+                yield f'data: {json.dumps({"type": "phases", "phases": info0.get("phases", [])})}\n\n'
 
             while True:
                 if await request.is_disconnected():
@@ -237,6 +278,12 @@ async def stream_logs(run_id: str, request: Request):
                 info = run_state.get(run_id)
                 if info is None:
                     break
+
+                # Push progress snapshots when they change
+                seq = info.get("progress_seq", 0)
+                if seq != sent_progress_seq:
+                    sent_progress_seq = seq
+                    yield f'data: {json.dumps({"type": "progress", "progress": info.get("progress", {})})}\n\n'
 
                 logs = info["logs"]
                 # Replay / tail buffered lines

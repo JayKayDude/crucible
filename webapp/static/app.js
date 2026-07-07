@@ -1383,7 +1383,7 @@ async function renderRun() {
         try {
           const { run_id } = await fetchAPI("/run", body, "POST");
           const label = `${model} · ${suites.join('+')}`;
-          spawnRunCard(run_id, label);
+          spawnRunCard(run_id, label, { phases: _CANON_PHASES.filter(p => suites.includes(p)) });
           document.getElementById('run-note').classList.add('hidden');
         } catch (e) {
           console.error('Run failed:', e);
@@ -1424,7 +1424,12 @@ async function renderRun() {
     if (Array.isArray(active)) {
       active
         .filter(r => r.status === 'running' && !document.getElementById(`run-card-${r.run_id}`))
-        .forEach(r => spawnRunCard(r.run_id, r.cmd_summary));
+        .forEach(r => {
+          const lbl = (r.phases && r.phases.length)
+            ? r.phases.map(p => _PHASE_LABEL[p] || p).join(' + ')
+            : r.cmd_summary;
+          spawnRunCard(r.run_id, lbl, { phases: r.phases, progress: r.progress });
+        });
     }
   } catch (_) {}
 }
@@ -1464,7 +1469,78 @@ async function _refreshCorpusDropdown() {
   _populateCorpusSelect(sel, corpora, true);
 }
 
-function spawnRunCard(run_id, label) {
+const _PHASE_LABEL = { recall: "Recall", coding: "Coding", reasoning: "Reasoning", speed: "Speed", toolcall: "Tool Calling" };
+const _CANON_PHASES = ["recall", "coding", "reasoning", "speed", "toolcall"];
+const _runProgress = {};  // run_id → { phases, progress, phaseStart, finished }
+
+function _fmtDuration(secs) {
+  if (secs < 60) return `${Math.round(secs)}s`;
+  const m = Math.floor(secs / 60), s = Math.round(secs % 60);
+  return s ? `${m}m ${s}s` : `${m}m`;
+}
+
+// Render the phase pills + progress bar + ETA + activity line for a run.
+function _renderRunProgress(run_id) {
+  const st = _runProgress[run_id];
+  if (!st) return;
+  const order = st.phases || [];
+
+  // Index of the furthest phase that has emitted any progress = current phase.
+  let curIdx = -1;
+  order.forEach((p, i) => { if (st.progress[p]) curIdx = i; });
+
+  const phasesEl = document.getElementById(`phases-${run_id}`);
+  if (phasesEl) {
+    phasesEl.innerHTML = '';
+    order.forEach((p, i) => {
+      let state;
+      if (st.finished === 'done')            state = 'done';
+      else if (st.finished && i < curIdx)    state = 'done';
+      else if (st.finished && i === Math.max(curIdx, 0)) state = st.finished; // error/cancelled
+      else if (st.finished)                  state = 'pending';
+      else if (i < curIdx)                   state = 'done';
+      else if (i === curIdx) {
+        const pr = st.progress[p];
+        state = (pr && pr.total && pr.done >= pr.total) ? 'done' : 'running';
+      } else                                 state = 'pending';
+      const pill = document.createElement('span');
+      pill.className = `run-phase ${state}`;
+      pill.textContent = _PHASE_LABEL[p] || p;
+      phasesEl.appendChild(pill);
+    });
+  }
+
+  const curPhase = curIdx >= 0 ? order[curIdx] : null;
+  const pr = curPhase ? st.progress[curPhase] : null;
+
+  const barFill = document.getElementById(`barfill-${run_id}`);
+  if (barFill) {
+    let frac = pr && pr.total ? Math.min(1, pr.done / pr.total) : 0;
+    if (st.finished === 'done') frac = 1;
+    barFill.style.width = (frac * 100).toFixed(1) + '%';
+  }
+
+  const actEl = document.getElementById(`activity-${run_id}`);
+  if (actEl) {
+    if (st.finished === 'done') actEl.textContent = 'Complete';
+    else if (pr) actEl.textContent =
+      `${_PHASE_LABEL[curPhase] || curPhase}: ${pr.label || ''}` + (pr.total ? ` (${pr.done}/${pr.total})` : '');
+    else actEl.textContent = 'Starting…';
+  }
+
+  const etaEl = document.getElementById(`eta-${run_id}`);
+  if (etaEl) {
+    etaEl.textContent = '';
+    // Need ≥2 completed steps in this phase to estimate a rate.
+    if (!st.finished && pr && pr.total && pr.done >= 2 && pr.done < pr.total && st.phaseStart[curPhase]) {
+      const elapsed = (Date.now() - st.phaseStart[curPhase]) / 1000;
+      const eta = elapsed / pr.done * (pr.total - pr.done);
+      if (eta > 0 && isFinite(eta)) etaEl.textContent = `~${_fmtDuration(eta)} left`;
+    }
+  }
+}
+
+function spawnRunCard(run_id, label, opts = {}) {
   const card = document.createElement('div');
   card.className = 'run-card';
   card.id = `run-card-${run_id}`;
@@ -1477,9 +1553,38 @@ function spawnRunCard(run_id, label) {
       <button class="run-cancel-btn" id="cancel-${run_id}">Cancel</button>
       <button class="run-dismiss-btn" id="dismiss-${run_id}" style="display:none">&#x2715;</button>
     </div>
-    <pre class="run-log" id="log-${run_id}"></pre>
+    <div class="run-progress">
+      <div class="run-phases" id="phases-${run_id}"></div>
+      <div class="run-bar-row">
+        <div class="run-bar"><div class="run-bar-fill" id="barfill-${run_id}"></div></div>
+        <span class="run-eta" id="eta-${run_id}"></span>
+      </div>
+      <div class="run-activity" id="activity-${run_id}">Starting…</div>
+    </div>
+    <div class="run-log-toggle" id="logtoggle-${run_id}">▸ Show log</div>
+    <pre class="run-log hidden" id="log-${run_id}"></pre>
   `;
   document.getElementById('run-cards').prepend(card);
+
+  // Seed progress state (SSE 'phases'/'progress' events refine it).
+  _runProgress[run_id] = {
+    phases: opts.phases && opts.phases.length ? opts.phases : [],
+    progress: opts.progress || {},
+    phaseStart: {},
+    finished: null,
+  };
+  Object.keys(_runProgress[run_id].progress).forEach(p => { _runProgress[run_id].phaseStart[p] = Date.now(); });
+  _renderRunProgress(run_id);
+
+  // Collapsible log toggle
+  document.getElementById(`logtoggle-${run_id}`).addEventListener('click', () => {
+    const log = document.getElementById(`log-${run_id}`);
+    const tog = document.getElementById(`logtoggle-${run_id}`);
+    if (!log) return;
+    const hidden = log.classList.toggle('hidden');
+    tog.textContent = hidden ? '▸ Show log' : '▾ Hide log';
+    if (!hidden) log.scrollTop = log.scrollHeight;
+  });
 
   // While running only Cancel is shown; ✕ appears once the run has finished
   // and only removes the card — it never cancels anything.
@@ -1488,30 +1593,41 @@ function spawnRunCard(run_id, label) {
     if (d) d.style.display = '';
   };
 
-  // Age timer
+  // Age timer — also refreshes ETA (elapsed grows between progress events)
   const ageInterval = setInterval(() => {
     const el = document.getElementById(`age-${run_id}`);
     if (!el) { clearInterval(ageInterval); return; }
     const s = Math.floor((Date.now() - startedAt) / 1000);
-    el.textContent = s < 60 ? `${s}s ago` : `${Math.floor(s/60)}m ago`;
+    if (!_runProgress[run_id]?.finished) el.textContent = s < 60 ? `${s}s ago` : `${Math.floor(s/60)}m ${s%60}s ago`;
+    _renderRunProgress(run_id);
   }, 5000);
 
-  // SSE log stream
+  // SSE stream (logs + progress)
   const src = new EventSource(`/api/run/${run_id}/logs`);
   _runSources[run_id] = src;
   src.onmessage = (e) => {
     const data = JSON.parse(e.data);
+    const st = _runProgress[run_id];
     if (data.type === 'log') {
       const log = document.getElementById(`log-${run_id}`);
-      if (log) { log.textContent += data.line + '\n'; log.scrollTop = log.scrollHeight; }
+      if (log) { log.textContent += data.line + '\n'; if (!log.classList.contains('hidden')) log.scrollTop = log.scrollHeight; }
+    } else if (data.type === 'phases') {
+      if (st && data.phases && data.phases.length) { st.phases = data.phases; _renderRunProgress(run_id); }
+    } else if (data.type === 'progress') {
+      if (st) {
+        st.progress = data.progress || {};
+        Object.keys(st.progress).forEach(p => { if (!(p in st.phaseStart)) st.phaseStart[p] = Date.now(); });
+        _renderRunProgress(run_id);
+      }
     } else if (data.type === 'done') {
       src.close(); delete _runSources[run_id];
+      if (st) { st.finished = data.status === 'done' ? 'done' : (data.status || 'error'); _renderRunProgress(run_id); }
       const dot = document.getElementById(`dot-${run_id}`);
-      if (dot) { dot.className = 'run-status-dot done'; }
+      if (dot) dot.className = 'run-status-dot ' + (data.status === 'done' ? 'done' : 'error');
       const cancelBtn = document.getElementById(`cancel-${run_id}`);
       if (cancelBtn) cancelBtn.style.display = 'none';
       const ageEl = document.getElementById(`age-${run_id}`);
-      if (ageEl) ageEl.textContent = 'Done';
+      if (ageEl) ageEl.textContent = data.status === 'done' ? `Done in ${_fmtDuration((Date.now()-startedAt)/1000)}` : (data.status || 'error');
       showDismiss();
       clearInterval(ageInterval);
     }
@@ -1527,6 +1643,8 @@ function spawnRunCard(run_id, label) {
   document.getElementById(`cancel-${run_id}`).addEventListener('click', async () => {
     await fetchAPI(`/run/${run_id}`, {}, "DELETE");
     if (_runSources[run_id]) { _runSources[run_id].close(); delete _runSources[run_id]; }
+    const st = _runProgress[run_id];
+    if (st) { st.finished = 'cancelled'; _renderRunProgress(run_id); }
     const dot = document.getElementById(`dot-${run_id}`);
     if (dot) dot.className = 'run-status-dot cancelled';
     document.getElementById(`cancel-${run_id}`).style.display = 'none';
@@ -1537,6 +1655,7 @@ function spawnRunCard(run_id, label) {
   // Dismiss button — removes the card only, never touches the run
   document.getElementById(`dismiss-${run_id}`).addEventListener('click', () => {
     if (_runSources[run_id]) { _runSources[run_id].close(); delete _runSources[run_id]; }
+    delete _runProgress[run_id];
     clearInterval(ageInterval);
     document.getElementById(`run-card-${run_id}`)?.remove();
   });
