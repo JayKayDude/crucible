@@ -668,12 +668,13 @@ select {
 .data-run-detail-str { font-size: 0.72rem; color: #6b7280; white-space: nowrap; }
 
 .data-detail-row { overflow: hidden; max-height: 0; transition: max-height 0.25s ease; background: #0f1117; border-bottom: 1px solid #1e2130; }
-.data-detail-row.open { max-height: 500px; }
-.data-detail-inner { padding: 10px 14px 12px 32px; }
+.data-detail-row.open { max-height: 80vh; }
+.data-detail-inner { padding: 10px 14px 12px 32px; max-height: 72vh; overflow-y: auto; }
 .data-detail-table { border-collapse: collapse; font-size: 0.78rem; min-width: 380px; }
 .data-detail-table th { color: #6b7280; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 10px; border-bottom: 1px solid #2a2d3a; text-align: left; font-weight: 500; }
 .data-detail-table td { padding: 4px 10px; color: #c4b5fd; border-bottom: 1px solid #1e2130; }
 .data-detail-table tr:last-child td { border-bottom: none; }
+.data-detail-table tr.data-row-errored td { color: #f59e0b; opacity: 0.8; }
 
 .data-edit-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .data-edit-modal.hidden { display: none; }

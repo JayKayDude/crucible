@@ -1022,15 +1022,25 @@ async function renderToolCalling() {
     const toolCountLabels = toolCounts.map(n => `${n} tools`);
 
     // z matrix: rows = context_bytes, cols = tool_count.
-    // `accuracy` counts correct refusals on irrelevance questions as wins —
-    // same math as the Overview radar.
+    // `accuracy` counts correct refusals on irrelevance questions as wins,
+    // averaged only over scored categories. A cell that ran but errored on
+    // every question (n_questions = 0) comes back with accuracy=null → we
+    // render it "err" (no color), never a misleading 0%.
+    const cellAt = (tc, cb) => rows.find(r => r.tool_count === tc && r.context_bytes === cb);
     const z = contextSizes.map(cb =>
       toolCounts.map(tc => {
-        const cell = rows.find(r => r.tool_count === tc && r.context_bytes === cb);
-        return cell ? (cell.accuracy ?? cell.arg_accuracy ?? null) : null;
+        const cell = cellAt(tc, cb);
+        return (cell && cell.accuracy != null) ? cell.accuracy : null;
       })
     );
-    const textVals = z.map(row => row.map(v => v !== null ? `${(v * 100).toFixed(1)}%` : "—"));
+    const textVals = contextSizes.map(cb =>
+      toolCounts.map(tc => {
+        const cell = cellAt(tc, cb);
+        if (!cell) return "—";                        // never run
+        if (cell.accuracy == null) return "err";      // ran, every question errored
+        return `${(cell.accuracy * 100).toFixed(1)}%`;
+      })
+    );
 
     const div = document.createElement("div");
     div.style.height = "420px";
@@ -1099,21 +1109,24 @@ async function _renderToolcallBreakdown(modelRow, label, tool_count, context_byt
   if (!data.length) { emptyChart("chart-toolcall-breakdown"); return; }
 
   const cats = [...new Set(data.map(r => r.category))];
-  const catValue = c => {
+  // A category with no scored questions (n=0) errored — show "err", not a 0 bar.
+  const catInfo = c => {
     const r = data.find(d => d.category === c);
-    if (!r) return null;
-    return c === "irrelevance" ? (r.irrelevance_accuracy ?? null) : (r.arg_accuracy ?? null);
+    if (!r || !r.n_questions) return { errored: true, value: null };
+    const v = c === "irrelevance" ? r.irrelevance_accuracy : r.arg_accuracy;
+    return { errored: false, value: v ?? null };
   };
 
   Plotly.newPlot("chart-toolcall-breakdown", [{
     type: "bar",
     name: label,
     x: cats,
-    y: cats.map(catValue),
+    y: cats.map(c => catInfo(c).value),
     marker: { color: modelColor(label) },
     text: cats.map(c => {
-      const v = catValue(c);
-      return v !== null && v !== undefined ? `${(v * 100).toFixed(1)}%` : "";
+      const { errored, value } = catInfo(c);
+      if (errored) return "err";
+      return value != null ? `${(value * 100).toFixed(1)}%` : "";
     }),
     textposition: "outside",
   }], {
@@ -2002,6 +2015,7 @@ async function renderData() {
         _updateDataToolbar();
       });
     });
+    document.getElementById("data-export-btn").addEventListener("click", _exportDataSelected);
     document.getElementById("data-edit-btn").addEventListener("click", _openDataEditModal);
     document.getElementById("data-delete-btn").addEventListener("click", _deleteDataSelected);
     document.getElementById("data-edit-save").addEventListener("click", _saveDataEdit);
@@ -2242,12 +2256,17 @@ function _renderDetailContent(el, type, rows) {
       html += `<tr><td>${r.context_tokens}</td><td>${gen}</td><td>${overall}</td><td>${ttft}</td><td>${r.n_samples}</td></tr>`;
     });
   } else if (type === "toolcall") {
-    html += `<thead><tr><th>Category</th><th>Tools</th><th>N</th><th>Tool Acc</th><th>Arg Acc</th><th>Irr Acc</th></tr></thead><tbody>`;
+    html += `<thead><tr><th>Category</th><th>Tools</th><th>Padding</th><th>N</th><th>Tool Acc</th><th>Arg Acc</th><th>Irr Acc</th></tr></thead><tbody>`;
     rows.forEach(r => {
-      const tool = r.tool_accuracy        != null ? `${(r.tool_accuracy * 100).toFixed(0)}%`        : "—";
-      const arg  = r.arg_accuracy         != null ? `${(r.arg_accuracy  * 100).toFixed(0)}%`        : "—";
-      const irr  = r.irrelevance_accuracy != null ? `${(r.irrelevance_accuracy * 100).toFixed(0)}%` : "—";
-      html += `<tr><td>${r.category}</td><td>${r.tool_count}</td><td>${r.n_questions}</td><td>${tool}</td><td>${arg}</td><td>${irr}</td></tr>`;
+      // n_questions = 0 means every question errored (e.g. server crash) — mark
+      // the row "errored" rather than showing a misleading 0%.
+      const errored = !r.n_questions;
+      const pct = v => v != null ? `${(v * 100).toFixed(0)}%` : "—";
+      const tool = errored ? "err" : pct(r.tool_accuracy);
+      const arg  = errored ? "err" : pct(r.arg_accuracy);
+      const irr  = errored ? "err" : pct(r.irrelevance_accuracy);
+      const pad  = r.context_bytes ? `${_fmtPaddingSize(r.context_bytes / 1024)} · ~${_fmtTokens(Math.round(r.context_bytes / _PADDING_CHARS_PER_TOKEN))} tok` : "0";
+      html += `<tr${errored ? ' class="data-row-errored"' : ''}><td>${r.category}</td><td>${r.tool_count}</td><td>${pad}</td><td>${r.n_questions}</td><td>${tool}</td><td>${arg}</td><td>${irr}</td></tr>`;
     });
   }
   html += `</tbody></table>`;
@@ -2257,8 +2276,58 @@ function _renderDetailContent(el, type, rows) {
 function _updateDataToolbar() {
   const n = _dataSelected.size;
   document.getElementById("data-count").textContent = n > 0 ? `${n} selected` : "";
+  document.getElementById("data-export-btn").disabled = n === 0;
   document.getElementById("data-edit-btn").disabled   = n === 0;
   document.getElementById("data-delete-btn").disabled = n === 0;
+}
+
+// Export the selected runs (metadata + full per-result rows) as a JSON file.
+async function _exportDataSelected() {
+  const keys = [..._dataSelected];
+  if (!keys.length) return;
+  const btn = document.getElementById("data-export-btn");
+  btn.disabled = true;
+  const prevText = btn.textContent;
+  btn.textContent = "Exporting…";
+  try {
+    const runs = [];
+    for (const key of keys) {
+      const colonIdx = key.indexOf(":");
+      const type   = key.slice(0, colonIdx);
+      const run_id = key.slice(colonIdx + 1);
+      const meta = _dataRuns.find(r => r.type === type && r.run_id === run_id) || {};
+      let results = [];
+      try { results = await fetchAPI(`/runs/${type}/${run_id}`); } catch (_) {}
+      runs.push({
+        type, run_id,
+        model_name:   meta.model_name,
+        config_name:  meta.config_name,
+        quantization: meta.quantization,
+        hardware:     meta.hardware,
+        created_at:   meta.created_at,
+        corpus:       meta.corpus,
+        task_suite:   meta.task_suite,
+        n_results:    results.length,
+        results,
+      });
+    }
+    const payload = { exported_at: new Date().toISOString(), count: runs.length, runs };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    a.href = url;
+    a.download = `benchmark-export-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert(`Export failed: ${e.message || e}`);
+  } finally {
+    btn.textContent = prevText;
+    btn.disabled = _dataSelected.size === 0;
+  }
 }
 
 function _openDataEditModal() {

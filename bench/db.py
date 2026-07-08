@@ -707,7 +707,8 @@ def query_overview(conn: sqlite3.Connection) -> list[dict]:
                              ELSE tr.arg_accuracy END)
              FROM toolcall_runs tcr2
              JOIN toolcall_results tr ON tr.run_id = tcr2.run_id
-             WHERE tcr2.model_config_id = mc.id) AS toolcall_accuracy
+             WHERE tcr2.model_config_id = mc.id
+               AND tr.n_questions > 0) AS toolcall_accuracy
         FROM model_configs mc
         ORDER BY mc.config_name
         """
@@ -777,7 +778,7 @@ def query_run_detail(conn: sqlite3.Connection, run_type: str, run_id: str) -> li
         rows = conn.execute(
             """SELECT category, tool_count, context_bytes, n_questions,
                       tool_accuracy, arg_accuracy, irrelevance_accuracy
-               FROM toolcall_results WHERE run_id = ? ORDER BY category, tool_count""",
+               FROM toolcall_results WHERE run_id = ? ORDER BY category, tool_count, context_bytes""",
             (run_id,),
         ).fetchall()
     else:
@@ -903,11 +904,15 @@ def query_toolcall_heatmap(
             mc.hardware,
             tr.tool_count,
             tr.context_bytes,
-            AVG(CASE WHEN tr.category = 'irrelevance'
-                     THEN tr.irrelevance_accuracy
-                     ELSE tr.arg_accuracy END) AS accuracy,
-            AVG(tr.tool_accuracy)        AS tool_accuracy,
-            AVG(tr.arg_accuracy)         AS arg_accuracy,
+            -- average only over scored categories; a cell where every category
+            -- errored (n_questions = 0) yields NULL, not a misleading 0%
+            AVG(CASE WHEN tr.n_questions > 0
+                     THEN (CASE WHEN tr.category = 'irrelevance'
+                                THEN tr.irrelevance_accuracy
+                                ELSE tr.arg_accuracy END)
+                     END) AS accuracy,
+            AVG(CASE WHEN tr.n_questions > 0 THEN tr.tool_accuracy END) AS tool_accuracy,
+            AVG(CASE WHEN tr.n_questions > 0 THEN tr.arg_accuracy END)  AS arg_accuracy,
             AVG(tr.irrelevance_accuracy) AS irrelevance_accuracy,
             SUM(tr.n_questions)          AS n_questions
         FROM toolcall_results tr
